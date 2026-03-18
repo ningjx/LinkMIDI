@@ -12,4 +12,5 @@ idf_component_register(
         "lwip"
         "esp_common"
         "common"
+        "mdns"
 )
