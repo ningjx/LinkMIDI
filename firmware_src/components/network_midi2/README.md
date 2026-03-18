@@ -323,7 +323,7 @@ idf_component_register(
 
 ## 示例代码
 
-参考[hello_world_main.c](main/hello_world_main.c)中的完整示例，演示了：
+参考[main.c](../../main/main.c)中的完整示例，演示了：
 1. WiFi连接
 2. 设备发现
 3. 会话建立

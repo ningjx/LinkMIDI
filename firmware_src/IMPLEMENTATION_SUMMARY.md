@@ -83,7 +83,7 @@ components/network_midi2/
 
 main/
 ├── CMakeLists.txt                      # 应用编译配置
-└── hello_world_main.c                  # 演示应用程序
+└── main.c                              # 演示应用程序
 
 项目根目录/
 ├── CMakeLists.txt                      # 项目配置
@@ -262,7 +262,6 @@ network_midi2_midi_to_string()
 
 ### 编译命令
 ```bash
-cd hello_world
 idf.py set-target esp32s3
 idf.py build flash monitor
 ```
@@ -280,7 +279,7 @@ cp -r components/network_midi2 /your/project/components/
 | [README.md](components/network_midi2/README.md) | 完整库文档、功能说明、API参考 |
 | [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) | 集成步骤、配置、故障排除、高级用法 |
 | [API_QUICK_REFERENCE.md](API_QUICK_REFERENCE.md) | 常用API快速查阅、代码片段、最佳实践 |
-| [hello_world_main.c](main/hello_world_main.c) | 完整可运行的演示程序 |
+| [main.c](main/main.c) | 完整可运行的演示程序 |
 
 ## 经过验证的功能
 
@@ -356,16 +355,16 @@ cp -r components/network_midi2 /your/project/components/
 ## 快速开始指令
 
 ```bash
-# 1. 克隆或进入项目目录  
-cd hello_world
+# 1. 进入项目目录（如果还未进入）
+# 确保在 firmware_src 目录下
 
 # 2. 根据需要修改WiFi配置
-# 编辑 main/hello_world_main.c 中的 YOUR_SSID 和 YOUR_PASSWORD
+# 编辑 main/main.c 中的 YOUR_SSID 和 YOUR_PASSWORD
 
 # 3. 编译
 idf.py build
 
-# 4. 添加设备到两台开发板
+# 4. 部署到开发板
 idf.py flash -p /dev/ttyUSB0
 
 # 5. 监视日志
