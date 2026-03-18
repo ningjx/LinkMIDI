@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS 
+        "src/network_midi2.c"
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES 
+        "freertos"
+        "lwip"
+        "esp_common"
+)
