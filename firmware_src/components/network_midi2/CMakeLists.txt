@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS 
         "src/network_midi2.c"
+        "src/mdns_discovery.c"
     INCLUDE_DIRS 
         "include"
     REQUIRES 

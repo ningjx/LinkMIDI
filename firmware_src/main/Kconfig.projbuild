@@ -1,0 +1,56 @@
+menu "Network MIDI 2.0 Configuration"
+
+    config WIFI_SSID
+        string "WiFi SSID"
+        default "YourSSID"
+        help
+            SSID of the WiFi network to connect to for network MIDI 2.0 services.
+
+    config WIFI_PASSWORD
+        string "WiFi Password"
+        default "YourPassword"
+        help
+            Password for the WiFi network.
+
+    config WIFI_MAXIMUM_RETRY
+        int "Maximum WiFi connection retry attempts"
+        default 5
+        help
+            Maximum number of retry attempts to connect to WiFi before giving up.
+
+    config WIFI_SCAN_METHOD
+        int "WiFi scan method (0=fast, 1=all channel)"
+        default 0
+        range 0 1
+        help
+            WiFi scan method: 0 for fast scan, 1 for all channel scan.
+
+    choice WIFI_SORT_METHOD
+        prompt "WiFi sort method"
+        default WIFI_CONNECT_AP_BY_SIGNAL
+        config WIFI_CONNECT_AP_BY_SIGNAL
+            bool "Connect to AP by signal strength"
+        config WIFI_CONNECT_AP_BY_SECURITY
+            bool "Connect to AP by security"
+    endchoice
+
+    config MIDI_DEVICE_NAME
+        string "MIDI 2.0 Device Name"
+        default "ESP32-MIDI2"
+        help
+            The name of this device as advertised via mDNS.
+
+    config MIDI_PRODUCT_ID
+        string "MIDI 2.0 Product ID"
+        default "ESP32S3"
+        help
+            The product identifier for this MIDI 2.0 device.
+
+    config MIDI_LISTEN_PORT
+        int "MIDI 2.0 Listen Port"
+        default 5507
+        range 1024 65535
+        help
+            UDP port to listen for MIDI 2.0 network connections.
+
+endmenu

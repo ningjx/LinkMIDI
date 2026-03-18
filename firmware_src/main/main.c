@@ -3,38 +3,16 @@
 #include "freertos/task.h"
 #include "esp_system.h"
 #include "spi_flash_mmap.h"
-#include "esp_event.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
 #include "esp_log.h"
 #include "network_midi2.h"
+#include "mdns_discovery.h"
+#include "wifi_manager.h"
 
 static const char* TAG = "MIDI2_TEST";
 
 static network_midi2_context_t* g_midi2_ctx = NULL;
+static mdns_discovery_context_t* g_mdns_ctx = NULL;
 static bool g_session_active = false;
-
-/* ============================================================================
- * WiFi and Network Callbacks
- * ============================================================================ */
-
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                               int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT) {
-        if (event_id == WIFI_EVENT_STA_START) {
-            ESP_LOGI(TAG, "WiFi station started, attempting to connect...");
-            esp_wifi_connect();
-        } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-            ESP_LOGI(TAG, "WiFi disconnected, attempting reconnection...");
-            esp_wifi_connect();
-        }
-    } else if (event_base == IP_EVENT) {
-        if (event_id == IP_EVENT_STA_GOT_IP) {
-            ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-            ESP_LOGI(TAG, "WiFi connected! IP address: " IPSTR, IP2STR(&event->ip_info.ip));
-        }
-    }
-}
 
 /* ============================================================================
  * MIDI2 Callbacks
@@ -112,68 +90,38 @@ static void session_monitor_task(void* arg) {
 }
 
 /* ============================================================================
- * WiFi Initialization
- * ============================================================================ */
-
-static void init_wifi(void) {
-    // Initialize network stack
-    ESP_ERROR_CHECK(esp_netif_init());
-    
-    // Create default WiFi STA netif
-    esp_netif_create_default_wifi_sta();
-    
-    // Create event loop
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, 
-                                               &wifi_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, 
-                                               &wifi_event_handler, NULL));
-    
-    // Initialize WiFi driver
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    
-    // Configure WiFi
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = "YourSSID",           // CHANGE THIS!
-            .password = "YourPassword",   // CHANGE THIS!
-            .scan_method = WIFI_FAST_SCAN,
-            .bssid_set = false,
-            .channel = 0,
-            .listen_interval = 0,
-            .sort_method = WIFI_CONNECT_AP_BY_SIGNAL,
-        },
-    };
-    
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    
-    ESP_LOGI(TAG, "Connecting to WiFi SSID: %s", (char*)wifi_config.sta.ssid);
-    ESP_ERROR_CHECK(esp_wifi_start());
-}
-
-/* ============================================================================
  * App Main
  * ============================================================================ */
 
 void app_main(void) {
     ESP_LOGI(TAG, "\n\n===== Network MIDI 2.0 Service Test =====");
-    ESP_LOGI(TAG, "Initializing WiFi...");
+    ESP_LOGI(TAG, "Starting WiFi initialization...");
     
-    // Initialize WiFi
-    init_wifi();
+    // Initialize WiFi with NVS
+    if (!wifi_manager_init()) {
+        ESP_LOGE(TAG, "Failed to initialize WiFi manager");
+        return;
+    }
     
-    // Wait for WiFi connection
-    ESP_LOGI(TAG, "Waiting for WiFi connection...");
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    // Connect to WiFi using configured credentials
+    if (!wifi_manager_connect()) {
+        ESP_LOGE(TAG, "Failed to configure WiFi connection");
+        return;
+    }
+    
+    // Wait for WiFi connection (timeout: 10 seconds)
+    if (!wifi_manager_wait_for_connection(10000)) {
+        ESP_LOGE(TAG, "Failed to connect to WiFi within timeout");
+        // Continue anyway - local operations may still work
+    }
     
     // Initialize MIDI 2.0 as SERVER (accepts connections from other devices)
     ESP_LOGI(TAG, "Initializing Network MIDI 2.0 Service...");
     
     network_midi2_config_t config = {
-        .device_name = "ESP32-MIDI2-Server",
-        .product_id = "ESP32S3",
-        .listen_port = 5507,
+        .device_name = CONFIG_MIDI_DEVICE_NAME,
+        .product_id = CONFIG_MIDI_PRODUCT_ID,
+        .listen_port = CONFIG_MIDI_LISTEN_PORT,
         .mode = MODE_SERVER,              // Act as server - other devices connect to us
         .enable_discovery = true,         // Announce via mDNS so others can discover
         .log_callback = midi2_log_callback,
@@ -187,14 +135,38 @@ void app_main(void) {
         return;
     }
     
-    // Start the service
+    // Initialize mDNS discovery module
+    ESP_LOGI(TAG, "Initializing mDNS discovery module...");
+    g_mdns_ctx = mdns_discovery_init(CONFIG_MIDI_DEVICE_NAME, 
+                                      CONFIG_MIDI_PRODUCT_ID,
+                                      CONFIG_MIDI_LISTEN_PORT);
+    if (!g_mdns_ctx) {
+        ESP_LOGE(TAG, "Failed to initialize mDNS discovery");
+        network_midi2_deinit(g_midi2_ctx);
+        return;
+    }
+    
+    // Start mDNS discovery
+    if (!mdns_discovery_start(g_mdns_ctx)) {
+        ESP_LOGE(TAG, "Failed to start mDNS discovery");
+        network_midi2_deinit(g_midi2_ctx);
+        mdns_discovery_deinit(g_mdns_ctx);
+        return;
+    }
+    
+    // Start the MIDI 2.0 service
     if (!network_midi2_start(g_midi2_ctx)) {
         ESP_LOGE(TAG, "Failed to start Network MIDI 2.0");
+        mdns_discovery_stop(g_mdns_ctx);
+        network_midi2_deinit(g_midi2_ctx);
+        mdns_discovery_deinit(g_mdns_ctx);
         return;
     }
     
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "MIDI 2.0 Service is RUNNING");
+    ESP_LOGI(TAG, "Device: %s", CONFIG_MIDI_DEVICE_NAME);
+    ESP_LOGI(TAG, "Port: %d", CONFIG_MIDI_LISTEN_PORT);
     ESP_LOGI(TAG, "Other devices can now discover and connect");
     ESP_LOGI(TAG, "Service will send C4 Note ON/OFF every 1s when connected");
     ESP_LOGI(TAG, "========================================\n");
