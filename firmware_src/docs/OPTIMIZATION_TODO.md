@@ -76,9 +76,19 @@
 - 各模块通过事件通信
 
 **验收标准**:
-- [ ] 移除 main.c 中的全局变量
-- [ ] 各模块通过事件总线通信
-- [ ] 支持事件订阅/发布机制
+- [x] 移除 main.c 中的全局变量
+- [x] 各模块通过事件总线通信
+- [x] 支持事件订阅/发布机制
+
+**实施内容** (2026-03-18):
+- 创建 `components/common/include/event_bus.h` - 事件总线接口
+- 创建 `components/common/src/event_bus.c` - 事件总线实现
+- 创建 `main/app_core.h` - 应用核心模块接口
+- 创建 `main/app_core.c` - 应用核心模块实现
+- 创建 `main/app_config.h` - 应用配置定义
+- 重构 `main/main.c` - 使用事件驱动架构
+- 支持的事件类型: MIDI数据、USB设备、会话、WiFi、发现等
+- 实现了 USB → Network 数据转发功能（通过事件触发）
 
 ---
 
