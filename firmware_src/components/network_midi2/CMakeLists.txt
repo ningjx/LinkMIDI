@@ -2,10 +2,14 @@ idf_component_register(
     SRCS 
         "src/network_midi2.c"
         "src/mdns_discovery.c"
+        "src/nm2_session.c"
+        "src/nm2_transport.c"
+        "src/nm2_discovery.c"
     INCLUDE_DIRS 
         "include"
     REQUIRES 
         "freertos"
         "lwip"
         "esp_common"
+        "common"
 )
