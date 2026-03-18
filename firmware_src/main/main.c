@@ -7,11 +7,13 @@
 #include "network_midi2.h"
 #include "mdns_discovery.h"
 #include "wifi_manager.h"
+#include "usb_midi_host.h"
 
 static const char* TAG = "MIDI2_TEST";
 
 static network_midi2_context_t* g_midi2_ctx = NULL;
 static mdns_discovery_context_t* g_mdns_ctx = NULL;
+static usb_midi_host_context_t* g_usb_midi_ctx = NULL;
 static bool g_session_active = false;
 
 /* ============================================================================
@@ -31,6 +33,34 @@ static void midi2_midi_rx_callback(const uint8_t* data, uint16_t length) {
 
 static void midi2_ump_rx_callback(const uint8_t* data, uint16_t length) {
     ESP_LOGI(TAG, "[RX_UMP] %d bytes", length);
+}
+
+/* ============================================================================
+ * USB MIDI Host Callbacks
+ * ============================================================================ */
+
+static void usb_midi_rx_callback(uint8_t device_index, const uint8_t* data, uint16_t length) {
+    if (length >= 3) {
+        ESP_LOGI(TAG, "[USB_MIDI_RX] Device %d: Status=0x%02X, Data1=%d, Data2=%d",
+                device_index, data[0], data[1], data[2]);
+        
+        // TODO: Forward this MIDI data to network_midi2 for transmission over network
+        // This will be implemented in the next phase
+    }
+}
+
+static void usb_midi_device_connected_callback(uint8_t device_index, 
+                                                const usb_midi_device_t* device_info) {
+    ESP_LOGI(TAG, "[USB_MIDI] Device %d connected: %s %s (VID:0x%04X PID:0x%04X)",
+            device_index,
+            device_info->manufacturer,
+            device_info->product_name,
+            device_info->vendor_id,
+            device_info->product_id);
+}
+
+static void usb_midi_device_disconnected_callback(uint8_t device_index) {
+    ESP_LOGI(TAG, "[USB_MIDI] Device %d disconnected", device_index);
 }
 
 /* ============================================================================
@@ -170,6 +200,29 @@ void app_main(void) {
     ESP_LOGI(TAG, "Other devices can now discover and connect");
     ESP_LOGI(TAG, "Service will send C4 Note ON/OFF every 1s when connected");
     ESP_LOGI(TAG, "========================================\n");
+    
+    // Initialize USB MIDI Host
+    ESP_LOGI(TAG, "Initializing USB MIDI Host...");
+    usb_midi_host_config_t usb_midi_config = {
+        .midi_rx_callback = usb_midi_rx_callback,
+        .device_connected_callback = usb_midi_device_connected_callback,
+        .device_disconnected_callback = usb_midi_device_disconnected_callback,
+    };
+    
+    g_usb_midi_ctx = usb_midi_host_init(&usb_midi_config);
+    if (!g_usb_midi_ctx) {
+        ESP_LOGE(TAG, "Failed to initialize USB MIDI host");
+    } else {
+        // Start USB MIDI host
+        if (usb_midi_host_start(g_usb_midi_ctx)) {
+            ESP_LOGI(TAG, "USB MIDI Host started successfully");
+            ESP_LOGI(TAG, "Connect a USB MIDI keyboard to the device");
+        } else {
+            ESP_LOGE(TAG, "Failed to start USB MIDI host");
+            usb_midi_host_deinit(g_usb_midi_ctx);
+            g_usb_midi_ctx = NULL;
+        }
+    }
     
     // Create monitoring tasks
     xTaskCreate(session_monitor_task, "session_monitor", 2048, NULL, 5, NULL);

@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "src/usb_midi_host.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        "freertos"
+        "usb"
+        "esp_common"
+)
