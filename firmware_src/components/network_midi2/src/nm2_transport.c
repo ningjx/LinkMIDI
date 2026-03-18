@@ -4,6 +4,7 @@
  */
 
 #include "nm2_transport.h"
+#include "midi_converter.h"
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
@@ -251,44 +252,34 @@ midi_error_t nm2_transport_send_ping(nm2_transport_t* transport,
 }
 
 /* ============================================================================
- * 协议转换
+ * 协议转换 (使用 midi_converter 模块)
  * ============================================================================ */
 
 void nm2_midi_to_ump(uint8_t status, uint8_t data1, uint8_t data2,
                      uint8_t* ump_out, uint8_t* ump_len) {
     if (!ump_out || !ump_len) return;
     
-    uint8_t msg_type = (status & 0xF0) >> 4;
-    uint8_t channel = status & 0x0F;
-    
-    // MT2 (MIDI 1.0 in UMP) format
-    // [mt:4][group:4][status:4][channel:4][data1:8][data2:8]
-    ump_out[0] = (0x02 << 4) | 0x00;  // MT=2, Group=0
-    ump_out[1] = (msg_type << 4) | channel;
-    ump_out[2] = data1;
-    ump_out[3] = data2;
-    
-    *ump_len = 4;
+    // 使用标准 MIDI 1.0 → UMP 转换 (MT=0x2)
+    midi_error_t err = midi1_to_ump_cv(status, data1, data2, 0, ump_out);
+    if (err == MIDI_OK) {
+        *ump_len = 4;
+    } else {
+        *ump_len = 0;
+    }
 }
 
 bool nm2_ump_to_midi(const uint8_t* ump_data, uint8_t ump_len,
                      uint8_t* midi_out, uint8_t* midi_len) {
     if (!ump_data || ump_len < 4 || !midi_out || !midi_len) return false;
     
-    uint8_t mt = (ump_data[0] >> 4) & 0x0F;
+    midi1_message_t msg;
+    midi_error_t err = ump_to_midi1(ump_data, ump_len, &msg);
     
-    // 只处理 MT2 (MIDI 1.0 in UMP)
-    if (mt != 0x02) return false;
-    
-    uint8_t status_type = (ump_data[1] >> 4) & 0x0F;
-    uint8_t channel = ump_data[1] & 0x0F;
-    
-    // 只处理 Channel Voice Messages
-    if (status_type >= 0x08 && status_type <= 0x0E) {
-        midi_out[0] = (status_type << 4) | channel;
-        midi_out[1] = ump_data[2];
-        midi_out[2] = ump_data[3];
-        *midi_len = 3;
+    if (err == MIDI_OK && msg.length >= 2) {
+        midi_out[0] = msg.status;
+        midi_out[1] = msg.data1;
+        midi_out[2] = msg.data2;
+        *midi_len = msg.length;
         return true;
     }
     
