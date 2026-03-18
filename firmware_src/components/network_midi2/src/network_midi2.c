@@ -860,7 +860,6 @@ static void network_midi2_process_received_packet(network_midi2_context_t* ctx,
     uint8_t cmd = cmdbyte & 0x0F;
     uint8_t status = data[1];
     uint8_t ssrc = data[2];
-    uint8_t remote_ssrc = data[3];
     
     // UMP Data
     if (cmdbyte == 0x10) {
