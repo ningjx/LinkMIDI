@@ -1,53 +1,138 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-H4 | ESP32-P4 | ESP32-S2 | ESP32-S3 | Linux |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- | -------- | ----- |
+# LinkMIDI Firmware
 
-# Hello World Example
+基于 ESP32-S3 的网络 MIDI 2.0 设备固件，支持 USB MIDI 输入和 WiFi 网络传输。
 
-Starts a FreeRTOS task to print "Hello World".
+## 硬件规格
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+| 项目 | 规格 |
+|------|------|
+| **MCU** | ESP32-S3-WROOM-1-N16R8 |
+| **Flash** | 16 MB |
+| **PSRAM** | 8 MB (OPI) |
+| **CPU** | Xtensa LX7 双核 240 MHz |
+| **WiFi** | 802.11 b/g/n |
+| **USB** | USB OTG (Host/Device) |
+| **GPIO** | GPIO19(D-), GPIO20(D+) |
 
-## How to use example
+## 功能特性
 
-Follow detailed instructions provided specifically for this example.
+- **USB MIDI Host** - 连接 USB MIDI 键盘/控制器，接收 MIDI 数据
+- **Network MIDI 2.0** - 通过 WiFi 传输 MIDI 2.0 协议
+- **mDNS 发现** - 自动发现网络上的 MIDI 2.0 设备
+- **会话管理** - 支持客户端/服务器/对等模式
+- **多设备支持** - 最多 4 个 USB MIDI 设备
 
-Select the instructions depending on Espressif chip installed on your development board:
-
-- [ESP32 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/stable/get-started/index.html)
-- [ESP32-S2 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s2/get-started/index.html)
-
-
-## Example folder contents
-
-The project contains one source file in C language [main.c](main/main.c). The file is located in folder [main](main).
-
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt` files that provide set of directives and instructions describing the project's source files and targets (executable, library, or both).
-
-Below is short explanation of remaining files in the project folder.
+## 项目结构
 
 ```
-├── CMakeLists.txt
-├── pytest_hello_world.py      Python script used for automated testing
-├── main
-│   ├── CMakeLists.txt
-│   └── main.c
-└── README.md                  This is the file you are currently reading
+firmware_src/
+├── main/
+│   ├── main.c              # 应用入口
+│   ├── wifi_manager.c/h    # WiFi 管理
+│   └── Kconfig.projbuild   # 配置选项
+├── components/
+│   ├── network_midi2/      # Network MIDI 2.0 协议
+│   │   ├── include/
+│   │   │   ├── network_midi2.h
+│   │   │   └── mdns_discovery.h
+│   │   └── src/
+│   └── usb_midi_host/      # USB MIDI 主机驱动
+│       ├── include/
+│       └── src/
+└── docs/                   # 文档
+    ├── ARCHITECTURE.md
+    └── API.md
 ```
 
-For more information on structure and contents of ESP-IDF projects, please refer to Section [Build System](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/build-system.html) of the ESP-IDF Programming Guide.
+## 快速开始
 
-## Troubleshooting
+### 1. 环境准备
 
-* Program upload failure
+```bash
+# 安装 ESP-IDF v5.5+
+# 参考: https://docs.espressif.com/projects/esp-idf/
 
-    * Hardware connection is not correct: run `idf.py -p PORT monitor`, and reboot your board to see if there are any output logs.
-    * The baud rate for downloading is too high: lower your baud rate in the `menuconfig` menu, and try again.
+# 设置环境变量
+. $HOME/esp/esp-idf/export.sh  # Linux/macOS
+# 或
+%USERPROFILE%\esp\esp-idf\export.bat  # Windows
+```
 
-## Technical support and feedback
+### 2. 配置项目
 
-Please use the following feedback channels:
+```bash
+cd firmware_src
 
-* For technical queries, go to the [esp32.com](https://esp32.com/) forum
-* For a feature request or bug report, create a [GitHub issue](https://github.com/espressif/esp-idf/issues)
+# 设置目标芯片
+idf.py set-target esp32s3
 
-We will get back to you as soon as possible.
+# 配置参数
+idf.py menuconfig
+# 导航到 "Network MIDI 2.0 Configuration" 配置 WiFi 和 MIDI 参数
+```
+
+### 3. 编译和刷写
+
+```bash
+# 编译
+idf.py build
+
+# 刷写
+idf.py -p COM3 flash
+
+# 监控输出
+idf.py -p COM3 monitor
+```
+
+### 4. 验证运行
+
+正常启动日志：
+```
+===== Network MIDI 2.0 Service Test =====
+Initializing NVS...
+WiFi connected!
+Got IP: 192.168.1.100
+MIDI 2.0 Service is RUNNING
+Device: ESP32-MIDI2, Port: 5507
+USB MIDI Host started
+```
+
+## GPIO 连接
+
+### USB MIDI Host
+
+```
+ESP32-S3              USB MIDI 设备
+────────              ─────────────
+GPIO19 (D-) ────────> USB D-
+GPIO20 (D+) ────────> USB D+
+GND          ────────> USB GND
+5V (可选)    ────────> USB VBUS
+```
+
+## 配置选项
+
+通过 `idf.py menuconfig` 配置：
+
+| 选项 | 默认值 | 说明 |
+|------|--------|------|
+| `CONFIG_WIFI_SSID` | - | WiFi 网络名称 |
+| `CONFIG_WIFI_PASSWORD` | - | WiFi 密码 |
+| `CONFIG_WIFI_MAXIMUM_RETRY` | 5 | 最大重试次数 |
+| `CONFIG_MIDI_DEVICE_NAME` | ESP32-MIDI2 | 设备名称 |
+| `CONFIG_MIDI_LISTEN_PORT` | 5507 | UDP 监听端口 |
+
+## 文档
+
+- [系统架构](docs/ARCHITECTURE.md)
+- [API 参考](docs/API.md)
+
+## 依赖
+
+- ESP-IDF >= 5.5
+- FreeRTOS
+- lwIP
+
+## 许可证
+
+MIT License
