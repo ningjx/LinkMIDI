@@ -142,8 +142,16 @@ midi_error_t nm2_transport_start(nm2_transport_t* transport) {
     transport->running = true;
     
     // 创建接收任务
-    xTaskCreate(receive_task, "nm2_rx", RECEIVE_TASK_STACK, transport, 
+    BaseType_t ret = xTaskCreate(receive_task, "nm2_rx", RECEIVE_TASK_STACK, transport, 
                 RECEIVE_TASK_PRIO, &transport->rx_task);
+    
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create receive task");
+        transport->running = false;
+        close(transport->socket);
+        transport->socket = -1;
+        return MIDI_ERR_NO_MEM;
+    }
     
     ESP_LOGI(TAG, "Transport started on port %d", transport->port);
     return MIDI_OK;
@@ -155,14 +163,20 @@ midi_error_t nm2_transport_stop(nm2_transport_t* transport) {
     
     transport->running = false;
     
+    // 等待任务结束
+    if (transport->rx_task) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+        // 强制删除任务（如果还在运行）
+        TaskHandle_t task = transport->rx_task;
+        transport->rx_task = NULL;
+        if (task) {
+            vTaskDelete(task);
+        }
+    }
+    
     if (transport->socket >= 0) {
         close(transport->socket);
         transport->socket = -1;
-    }
-    
-    if (transport->rx_task) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        transport->rx_task = NULL;
     }
     
     ESP_LOGI(TAG, "Transport stopped");

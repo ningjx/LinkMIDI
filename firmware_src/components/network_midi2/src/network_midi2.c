@@ -232,7 +232,12 @@ static bool network_midi2_create_discovery_socket(network_midi2_context_t* ctx) 
     
     // Set socket options
     int reuse = 1;
-    setsockopt(ctx->discovery_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    if (setsockopt(ctx->discovery_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        network_midi2_logf(ctx, "[Error] Failed to set SO_REUSEADDR on discovery socket: %d", errno);
+        close(ctx->discovery_socket);
+        ctx->discovery_socket = -1;
+        return false;
+    }
     
     // Bind to mDNS port (for both client and server)
     struct sockaddr_in addr = {0};
@@ -290,6 +295,11 @@ static void network_midi2_mdns_encode_name(const char* name, uint8_t* buffer, in
 
 static uint8_t* network_midi2_create_mdns_query(int* out_len) {
     uint8_t* packet = malloc(512);
+    if (!packet) {
+        ESP_LOGE(TAG, "Failed to allocate mDNS query packet");
+        return NULL;
+    }
+    
     int offset = 0;
     
     // DNS Header
@@ -319,6 +329,11 @@ static uint8_t* network_midi2_create_mdns_query(int* out_len) {
 
 static uint8_t* network_midi2_create_mdns_announcement(network_midi2_context_t* ctx, int* out_len) {
     uint8_t* packet = malloc(512);
+    if (!packet) {
+        ESP_LOGE(TAG, "Failed to allocate mDNS announcement packet");
+        return NULL;
+    }
+    
     int offset = 0;
     
     // DNS Header
@@ -1064,6 +1079,20 @@ void network_midi2_stop(network_midi2_context_t* ctx) {
         network_midi2_session_terminate(ctx);
     }
     
+    // Wait for tasks to finish
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // Force delete tasks if still running
+    if (ctx->receive_task_handle) {
+        vTaskDelete(ctx->receive_task_handle);
+        ctx->receive_task_handle = NULL;
+    }
+    
+    if (ctx->discovery_task_handle) {
+        vTaskDelete(ctx->discovery_task_handle);
+        ctx->discovery_task_handle = NULL;
+    }
+    
     // Close sockets
     if (ctx->data_socket >= 0) {
         close(ctx->data_socket);
@@ -1074,9 +1103,6 @@ void network_midi2_stop(network_midi2_context_t* ctx) {
         close(ctx->discovery_socket);
         ctx->discovery_socket = -1;
     }
-    
-    // Wait for tasks to finish
-    vTaskDelay(pdMS_TO_TICKS(100));
     
     network_midi2_log(ctx, "[Stop] Device stopped");
 }

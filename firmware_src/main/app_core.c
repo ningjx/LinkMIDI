@@ -29,6 +29,13 @@ typedef struct {
     bool running;
     bool session_active;
     
+    /* 同步保护 */
+    SemaphoreHandle_t mutex;
+    
+    /* 任务句柄 */
+    TaskHandle_t session_monitor_task;
+    TaskHandle_t test_midi_task;
+    
     /* 模块句柄 */
     network_midi2_context_t* midi2_ctx;
     mdns_discovery_context_t* mdns_ctx;
@@ -50,6 +57,32 @@ typedef struct {
 static app_context_t g_app = {0};
 
 /* ============================================================================
+ * 内部辅助函数
+ * ============================================================================ */
+
+/**
+ * @brief 安全设置会话状态
+ */
+static void set_session_active(bool active) {
+    if (xSemaphoreTake(g_app.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        g_app.session_active = active;
+        xSemaphoreGive(g_app.mutex);
+    }
+}
+
+/**
+ * @brief 安全获取会话状态
+ */
+static bool get_session_active(void) {
+    bool active = false;
+    if (xSemaphoreTake(g_app.mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        active = g_app.session_active;
+        xSemaphoreGive(g_app.mutex);
+    }
+    return active;
+}
+
+/* ============================================================================
  * 事件处理
  * ============================================================================ */
 
@@ -63,7 +96,7 @@ static void on_midi_data_event(const event_t* event, void* user_data) {
              midi->source, midi->length, midi->length > 0 ? midi->data[0] : 0);
     
     // 如果来自 USB 且会话激活，转发到网络
-    if (midi->source == 0 && g_app.session_active && g_app.midi2_ctx) {
+    if (midi->source == 0 && get_session_active() && g_app.midi2_ctx) {
         if (midi->length >= 3) {
             midi_error_t err = network_midi2_send_midi(
                 g_app.midi2_ctx,
@@ -105,7 +138,7 @@ static void on_session_established_event(const event_t* event, void* user_data) 
     const event_session_t* session = &event->data.session;
     ESP_LOGI(TAG, "=== Session ESTABLISHED === (SSRC: 0x%08X, Name: %s)",
              (unsigned int)session->remote_ssrc, session->remote_name);
-    g_app.session_active = true;
+    set_session_active(true);
 }
 
 /**
@@ -113,7 +146,7 @@ static void on_session_established_event(const event_t* event, void* user_data) 
  */
 static void on_session_terminated_event(const event_t* event, void* user_data) {
     ESP_LOGI(TAG, "=== Session CLOSED ===");
-    g_app.session_active = false;
+    set_session_active(false);
 }
 
 /**
@@ -184,10 +217,12 @@ static void session_monitor_task(void* arg) {
         
         bool is_active = network_midi2_is_session_active(g_app.midi2_ctx);
         
-        if (is_active && !g_app.session_active) {
+        bool session_was_active = get_session_active();
+        
+        if (is_active && !session_was_active) {
             // 会话新建 - 发布事件
             event_bus_publish_session_established(0, "remote");
-        } else if (!is_active && g_app.session_active) {
+        } else if (!is_active && session_was_active) {
             // 会话关闭 - 发布事件
             event_bus_publish_session_terminated();
         }
@@ -211,7 +246,7 @@ static void test_midi_send_task(void* arg) {
     while (g_app.running) {
         vTaskDelay(pdMS_TO_TICKS(APP_MIDI_SEND_INTERVAL_MS));
         
-        if (g_app.session_active && g_app.midi2_ctx) {
+        if (get_session_active() && g_app.midi2_ctx) {
             if (note_on) {
                 ESP_LOGI(TAG, "[TEST] Sending Note ON - C4");
                 network_midi2_send_note_on(g_app.midi2_ctx, note, velocity, channel);
@@ -242,6 +277,13 @@ midi_error_t app_core_init(const app_config_t* config) {
     
     memset(&g_app, 0, sizeof(g_app));
     g_app.config = *config;
+    
+    // 创建互斥锁
+    g_app.mutex = xSemaphoreCreateMutex();
+    if (!g_app.mutex) {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        return MIDI_ERR_NO_MEM;
+    }
     
     // 初始化事件总线
     midi_error_t err = event_bus_init();
@@ -368,12 +410,35 @@ midi_error_t app_core_start(void) {
     // 6. 创建监控任务
     g_app.running = true;
     
-    xTaskCreate(session_monitor_task, "session_mon", APP_SESSION_MONITOR_STACK, 
-                NULL, APP_SESSION_MONITOR_PRIORITY, NULL);
+    BaseType_t ret;
+    ret = xTaskCreate(session_monitor_task, "session_mon", APP_SESSION_MONITOR_STACK, 
+                NULL, APP_SESSION_MONITOR_PRIORITY, &g_app.session_monitor_task);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create session monitor task");
+        g_app.running = false;
+        // 清理已初始化的资源
+        if (g_app.usb_midi_ctx) {
+            usb_midi_host_stop(g_app.usb_midi_ctx);
+            usb_midi_host_deinit(g_app.usb_midi_ctx);
+            g_app.usb_midi_ctx = NULL;
+        }
+        network_midi2_stop(g_app.midi2_ctx);
+        mdns_discovery_stop(g_app.mdns_ctx);
+        mdns_discovery_deinit(g_app.mdns_ctx);
+        network_midi2_deinit(g_app.midi2_ctx);
+        g_app.midi2_ctx = NULL;
+        g_app.mdns_ctx = NULL;
+        return MIDI_ERR_NO_MEM;
+    }
     
     if (g_app.config.enable_test_sender) {
-        xTaskCreate(test_midi_send_task, "test_midi", APP_MIDI_SEND_STACK,
-                    NULL, APP_MIDI_SEND_PRIORITY, NULL);
+        ret = xTaskCreate(test_midi_send_task, "test_midi", APP_MIDI_SEND_STACK,
+                    NULL, APP_MIDI_SEND_PRIORITY, &g_app.test_midi_task);
+        if (ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create test MIDI task");
+            // 非致命错误，继续运行
+            g_app.test_midi_task = NULL;
+        }
     }
     
     ESP_LOGI(TAG, "========================================");
@@ -391,6 +456,20 @@ midi_error_t app_core_stop(void) {
     }
     
     g_app.running = false;
+    
+    // 等待任务结束
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // 删除任务（如果还在运行）
+    if (g_app.session_monitor_task) {
+        vTaskDelete(g_app.session_monitor_task);
+        g_app.session_monitor_task = NULL;
+    }
+    
+    if (g_app.test_midi_task) {
+        vTaskDelete(g_app.test_midi_task);
+        g_app.test_midi_task = NULL;
+    }
     
     // 停止各模块
     if (g_app.usb_midi_ctx) {
@@ -437,6 +516,11 @@ midi_error_t app_core_deinit(void) {
     
     event_bus_deinit();
     
+    // 删除互斥锁
+    if (g_app.mutex) {
+        vSemaphoreDelete(g_app.mutex);
+    }
+    
     memset(&g_app, 0, sizeof(g_app));
     
     ESP_LOGI(TAG, "App core deinitialized");
@@ -448,5 +532,5 @@ bool app_core_is_running(void) {
 }
 
 bool app_core_is_session_active(void) {
-    return g_app.session_active;
+    return get_session_active();
 }
