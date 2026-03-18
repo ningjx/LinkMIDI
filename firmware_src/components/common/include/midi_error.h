@@ -49,6 +49,7 @@ typedef enum {
     MIDI_ERR_BUFFER_EMPTY           = 0x0109,  ///< Buffer empty
     MIDI_ERR_BUSY                   = 0x010A,  ///< Resource busy
     MIDI_ERR_NOT_SUPPORTED          = 0x010B,  ///< Operation not supported
+    MIDI_ERR_STORAGE_ERROR          = 0x010C,  ///< Storage operation failed
     
     /* ==========================================================================
      * Network Errors (0x02xx)

@@ -12,6 +12,7 @@
 #include "mdns_discovery.h"
 #include "wifi_manager.h"
 #include "usb_midi_host.h"
+#include "config_manager.h"
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -271,24 +272,65 @@ midi_error_t app_core_init(const app_config_t* config) {
         return MIDI_ERR_ALREADY_INITIALIZED;
     }
     
-    if (!config) {
-        return MIDI_ERR_INVALID_ARG;
+    // 初始化配置管理器
+    midi_error_t err = config_manager_init();
+    if (err != MIDI_OK) {
+        ESP_LOGE(TAG, "Failed to init config manager: %s", midi_error_str(err));
+        return err;
+    }
+    
+    // 加载配置
+    system_config_t sys_config;
+    if (config_manager_is_configured()) {
+        err = config_manager_load(&sys_config);
+        if (err != MIDI_OK) {
+            ESP_LOGW(TAG, "Failed to load config, using defaults");
+            config_manager_get_defaults(&sys_config);
+        }
+    } else {
+        // 使用传入的配置或默认配置
+        if (config) {
+            // 从传入的配置创建系统配置
+            memset(&sys_config, 0, sizeof(sys_config));
+            strncpy(sys_config.wifi.ssid, CONFIG_WIFI_SSID, sizeof(sys_config.wifi.ssid) - 1);
+            strncpy(sys_config.wifi.password, CONFIG_WIFI_PASSWORD, sizeof(sys_config.wifi.password) - 1);
+            sys_config.wifi.max_retry = CONFIG_WIFI_MAXIMUM_RETRY;
+            sys_config.wifi.auto_connect = true;
+            
+            strncpy(sys_config.midi.device_name, config->device_name, sizeof(sys_config.midi.device_name) - 1);
+            strncpy(sys_config.midi.product_id, config->product_id, sizeof(sys_config.midi.product_id) - 1);
+            sys_config.midi.listen_port = config->listen_port;
+            sys_config.midi.device_mode = 1;  // Server mode
+            sys_config.midi.enable_discovery = true;
+            
+            // 保存配置
+            config_manager_save(&sys_config);
+        } else {
+            config_manager_get_defaults(&sys_config);
+        }
     }
     
     memset(&g_app, 0, sizeof(g_app));
-    g_app.config = *config;
+    
+    // 使用配置管理器加载的配置
+    g_app.config.device_name = sys_config.midi.device_name;
+    g_app.config.product_id = sys_config.midi.product_id;
+    g_app.config.listen_port = sys_config.midi.listen_port;
+    g_app.config.enable_test_sender = config ? config->enable_test_sender : false;
     
     // 创建互斥锁
     g_app.mutex = xSemaphoreCreateMutex();
     if (!g_app.mutex) {
         ESP_LOGE(TAG, "Failed to create mutex");
+        config_manager_deinit();
         return MIDI_ERR_NO_MEM;
     }
     
     // 初始化事件总线
-    midi_error_t err = event_bus_init();
+    err = event_bus_init();
     if (err != MIDI_OK) {
         ESP_LOGE(TAG, "Failed to init event bus: %s", midi_error_str(err));
+        config_manager_deinit();
         return err;
     }
     
@@ -302,6 +344,8 @@ midi_error_t app_core_init(const app_config_t* config) {
     g_app.sub_wifi_disconnected = event_bus_subscribe(EVENT_WIFI_DISCONNECTED, on_wifi_disconnected_event, NULL);
     
     ESP_LOGI(TAG, "App core initialized");
+    ESP_LOGI(TAG, "  Device: %s", g_app.config.device_name);
+    ESP_LOGI(TAG, "  Port: %d", g_app.config.listen_port);
     g_app.initialized = true;
     
     return MIDI_OK;
@@ -515,6 +559,9 @@ midi_error_t app_core_deinit(void) {
     event_bus_unsubscribe(g_app.sub_wifi_disconnected);
     
     event_bus_deinit();
+    
+    // 清理配置管理器
+    config_manager_deinit();
     
     // 删除互斥锁
     if (g_app.mutex) {
