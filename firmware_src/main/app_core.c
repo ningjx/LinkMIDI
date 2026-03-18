@@ -13,6 +13,8 @@
 #include "wifi_manager.h"
 #include "usb_midi_host.h"
 #include "config_manager.h"
+#include "web_config_server.h"
+#include "ota_manager.h"
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -381,7 +383,39 @@ midi_error_t app_core_start(void) {
         event_bus_publish_wifi_connected();
     }
     
-    // 2. 初始化 Network MIDI 2.0
+    // 2. 初始化 OTA 管理器
+    ESP_LOGI(TAG, "Initializing OTA manager...");
+    midi_error_t err = ota_manager_init();
+    if (err != MIDI_OK) {
+        ESP_LOGW(TAG, "Failed to init OTA manager, continuing without OTA");
+    }
+    
+    // 检查是否需要验证OTA
+    if (ota_manager_needs_validation()) {
+        ESP_LOGI(TAG, "Validating OTA update...");
+        ota_manager_mark_valid();
+    }
+    
+    // 3. 初始化 Web 配置服务器
+    ESP_LOGI(TAG, "Initializing Web config server...");
+    web_server_config_t web_config = {
+        .port = 80,
+        .enable_captive_portal = true,
+    };
+    err = web_config_server_init(&web_config);
+    if (err != MIDI_OK) {
+        ESP_LOGW(TAG, "Failed to init Web server, continuing without Web UI");
+    } else {
+        // 启动Web服务器
+        err = web_config_server_start();
+        if (err != MIDI_OK) {
+            ESP_LOGW(TAG, "Failed to start Web server");
+        } else {
+            ESP_LOGI(TAG, "Web config server started on port 80");
+        }
+    }
+    
+    // 4. 初始化 Network MIDI 2.0
     ESP_LOGI(TAG, "Initializing Network MIDI 2.0...");
     network_midi2_config_t midi2_cfg = {
         .device_name = g_app.config.device_name,
@@ -400,7 +434,7 @@ midi_error_t app_core_start(void) {
         return MIDI_ERR_NO_MEM;
     }
     
-    // 3. 初始化 mDNS 发现
+    // 5. 初始化 mDNS 发现
     ESP_LOGI(TAG, "Initializing mDNS discovery...");
     g_app.mdns_ctx = mdns_discovery_init(
         g_app.config.device_name,
@@ -423,7 +457,7 @@ midi_error_t app_core_start(void) {
         return MIDI_ERR_NET_MDNS_FAILED;
     }
     
-    // 4. 启动 MIDI 2.0 服务
+    // 6. 启动 MIDI 2.0 服务
     if (!network_midi2_start(g_app.midi2_ctx)) {
         ESP_LOGE(TAG, "Failed to start MIDI 2.0");
         mdns_discovery_stop(g_app.mdns_ctx);
@@ -434,7 +468,7 @@ midi_error_t app_core_start(void) {
         return MIDI_ERR_SESSION_INIT_FAILED;
     }
     
-    // 5. 初始化 USB MIDI Host
+    // 7. 初始化 USB MIDI Host
     ESP_LOGI(TAG, "Initializing USB MIDI Host...");
     usb_midi_host_config_t usb_cfg = {
         .midi_rx_callback = usb_midi_rx_callback,
@@ -451,7 +485,7 @@ midi_error_t app_core_start(void) {
         g_app.usb_midi_ctx = NULL;
     }
     
-    // 6. 创建监控任务
+    // 8. 创建监控任务
     g_app.running = true;
     
     BaseType_t ret;
@@ -516,6 +550,10 @@ midi_error_t app_core_stop(void) {
     }
     
     // 停止各模块
+    // 停止Web服务器
+    web_config_server_stop();
+    
+    // 停止USB MIDI
     if (g_app.usb_midi_ctx) {
         usb_midi_host_stop(g_app.usb_midi_ctx);
         usb_midi_host_deinit(g_app.usb_midi_ctx);
@@ -559,6 +597,12 @@ midi_error_t app_core_deinit(void) {
     event_bus_unsubscribe(g_app.sub_wifi_disconnected);
     
     event_bus_deinit();
+    
+    // 清理Web服务器
+    web_config_server_deinit();
+    
+    // 清理OTA管理器
+    ota_manager_deinit();
     
     // 清理配置管理器
     config_manager_deinit();

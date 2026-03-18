@@ -1,0 +1,27 @@
+# Name,   Type, SubType, Offset,   Size,     Flags
+# ESP32-S3 16MB flash with OTA support
+# All app partitions aligned to 0x10000 (64KB)
+
+# NVS (24KB)
+nvs,        data, nvs,     0x9000,   0x6000,
+
+# PHY init data (4KB)
+phy_init,   data, phy,     0xf000,   0x1000,
+
+# Factory app (4MB)
+factory,    app,  factory, 0x10000,  0x400000,
+
+# OTA data (8KB, aligned)
+ota_data,   data, ota,     0x420000, 0x2000,
+
+# OTA partition 0 (4MB, aligned to 64KB)
+ota_0,      app,  ota_0,   0x430000, 0x400000,
+
+# OTA partition 1 (4MB, aligned to 64KB)
+ota_1,      app,  ota_1,   0x830000, 0x400000,
+
+# NVS for config storage (256KB)
+nvs_config, data, nvs,     0xC30000, 0x40000,
+
+# SPIFFS for web files (2MB)
+spiffs,     data, spiffs,  0xC70000, 0x200000,
