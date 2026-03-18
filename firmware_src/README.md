@@ -46,6 +46,8 @@ firmware_src/
 
 ## 快速开始
 
+⚠️ **重要提示**: 所有 ESP-IDF 相关命令（如 `idf.py build`、`idf.py flash` 等）必须通过 ESP-IDF Shell 环境执行。详细说明请参考 [ESP-IDF Shell 使用指南](docs/ESP-IDF-SHELL.md)。
+
 ### 1. 环境准备
 
 ```bash
@@ -58,30 +60,34 @@ firmware_src/
 %USERPROFILE%\esp\esp-idf\export.bat  # Windows
 ```
 
-### 2. 配置项目
+### 2. 编译和刷写
 
-```bash
-cd firmware_src
+使用 ESP-IDF Shell 编译和刷写固件：
 
-# 设置目标芯片
-idf.py set-target esp32s3
+```powershell
+# 编译项目
+powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "& {. 'C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1'; cd d:\WorkSpace\LinkMIDI\firmware_src; idf.py build}"
 
-# 配置参数
-idf.py menuconfig
-# 导航到 "Network MIDI 2.0 Configuration" 配置 WiFi 和 MIDI 参数
+# 烧录固件（替换 COM3 为您的串口）
+powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "& {. 'C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1'; cd d:\WorkSpace\LinkMIDI\firmware_src; idf.py -p COM3 flash}"
+
+# 监控串口输出
+powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "& {. 'C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1'; cd d:\WorkSpace\LinkMIDI\firmware_src; idf.py -p COM3 monitor}"
 ```
 
-### 3. 编译和刷写
+或使用简化命令（完整流程）：
+```powershell
+powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "& {. 'C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1'; cd d:\WorkSpace\LinkMIDI\firmware_src; idf.py -p COM3 build flash monitor}"
+```
 
-```bash
-# 编译
-idf.py build
+**配置项目**（可选）：
+```powershell
+# 设置目标芯片
+powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "& {. 'C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1'; cd d:\WorkSpace\LinkMIDI\firmware_src; idf.py set-target esp32s3}"
 
-# 刷写
-idf.py -p COM3 flash
-
-# 监控输出
-idf.py -p COM3 monitor
+# 打开配置菜单
+powershell.exe -ExecutionPolicy Bypass -NoProfile -Command "& {. 'C:\Espressif\tools\Microsoft.v5.5.3.PowerShell_profile.ps1'; cd d:\WorkSpace\LinkMIDI\firmware_src; idf.py menuconfig}"
+# 导航到 "Network MIDI 2.0 Configuration" 配置 WiFi 和 MIDI 参数
 ```
 
 ### 4. 验证运行
