@@ -53,7 +53,10 @@ typedef struct {
     uint32_t sub_wifi_connected;
     uint32_t sub_wifi_disconnected;
     
-    /* 配置 */
+    /* 系统配置 (持久化存储) */
+    system_config_t sys_config;
+    
+    /* 运行时配置 */
     app_config_t config;
 } app_context_t;
 
@@ -274,6 +277,9 @@ midi_error_t app_core_init(const app_config_t* config) {
         return MIDI_ERR_ALREADY_INITIALIZED;
     }
     
+    // 清零上下文
+    memset(&g_app, 0, sizeof(g_app));
+    
     // 初始化配置管理器
     midi_error_t err = config_manager_init();
     if (err != MIDI_OK) {
@@ -281,43 +287,41 @@ midi_error_t app_core_init(const app_config_t* config) {
         return err;
     }
     
-    // 加载配置
-    system_config_t sys_config;
+    // 加载配置到 app 上下文
     if (config_manager_is_configured()) {
-        err = config_manager_load(&sys_config);
+        err = config_manager_load(&g_app.sys_config);
         if (err != MIDI_OK) {
             ESP_LOGW(TAG, "Failed to load config, using defaults");
-            config_manager_get_defaults(&sys_config);
+            config_manager_get_defaults(&g_app.sys_config);
         }
     } else {
         // 使用传入的配置或默认配置
         if (config) {
             // 从传入的配置创建系统配置
-            memset(&sys_config, 0, sizeof(sys_config));
-            strncpy(sys_config.wifi.ssid, CONFIG_WIFI_SSID, sizeof(sys_config.wifi.ssid) - 1);
-            strncpy(sys_config.wifi.password, CONFIG_WIFI_PASSWORD, sizeof(sys_config.wifi.password) - 1);
-            sys_config.wifi.max_retry = CONFIG_WIFI_MAXIMUM_RETRY;
-            sys_config.wifi.auto_connect = true;
+            memset(&g_app.sys_config, 0, sizeof(g_app.sys_config));
+            strncpy(g_app.sys_config.wifi.ssid, CONFIG_WIFI_SSID, sizeof(g_app.sys_config.wifi.ssid) - 1);
+            strncpy(g_app.sys_config.wifi.password, CONFIG_WIFI_PASSWORD, sizeof(g_app.sys_config.wifi.password) - 1);
+            g_app.sys_config.wifi.max_retry = CONFIG_WIFI_MAXIMUM_RETRY;
+            g_app.sys_config.wifi.auto_connect = true;
             
-            strncpy(sys_config.midi.device_name, config->device_name, sizeof(sys_config.midi.device_name) - 1);
-            strncpy(sys_config.midi.product_id, config->product_id, sizeof(sys_config.midi.product_id) - 1);
-            sys_config.midi.listen_port = config->listen_port;
-            sys_config.midi.device_mode = 1;  // Server mode
-            sys_config.midi.enable_discovery = true;
+            strncpy(g_app.sys_config.midi.device_name, config->device_name, sizeof(g_app.sys_config.midi.device_name) - 1);
+            strncpy(g_app.sys_config.midi.product_id, config->product_id, sizeof(g_app.sys_config.midi.product_id) - 1);
+            g_app.sys_config.midi.listen_port = config->listen_port;
+            g_app.sys_config.midi.device_mode = 1;  // Server mode
+            g_app.sys_config.midi.enable_discovery = true;
+            g_app.sys_config.is_configured = true;
             
             // 保存配置
-            config_manager_save(&sys_config);
+            config_manager_save(&g_app.sys_config);
         } else {
-            config_manager_get_defaults(&sys_config);
+            config_manager_get_defaults(&g_app.sys_config);
         }
     }
     
-    memset(&g_app, 0, sizeof(g_app));
-    
-    // 使用配置管理器加载的配置
-    g_app.config.device_name = sys_config.midi.device_name;
-    g_app.config.product_id = sys_config.midi.product_id;
-    g_app.config.listen_port = sys_config.midi.listen_port;
+    // 设置运行时配置指针 (指向持久化存储)
+    g_app.config.device_name = g_app.sys_config.midi.device_name;
+    g_app.config.product_id = g_app.sys_config.midi.product_id;
+    g_app.config.listen_port = g_app.sys_config.midi.listen_port;
     g_app.config.enable_test_sender = config ? config->enable_test_sender : false;
     
     // 创建互斥锁
@@ -624,4 +628,62 @@ bool app_core_is_running(void) {
 
 bool app_core_is_session_active(void) {
     return get_session_active();
+}
+
+const system_config_t* app_core_get_config(void) {
+    if (!g_app.initialized) {
+        return NULL;
+    }
+    return &g_app.sys_config;
+}
+
+midi_error_t app_core_update_wifi_config(const char* ssid, const char* password) {
+    if (!g_app.initialized) {
+        return MIDI_ERR_NOT_INITIALIZED;
+    }
+    if (!ssid || !password) {
+        return MIDI_ERR_INVALID_ARG;
+    }
+    
+    // 更新内存中的配置
+    strncpy(g_app.sys_config.wifi.ssid, ssid, sizeof(g_app.sys_config.wifi.ssid) - 1);
+    strncpy(g_app.sys_config.wifi.password, password, sizeof(g_app.sys_config.wifi.password) - 1);
+    g_app.sys_config.wifi.auto_connect = true;
+    
+    // 保存到 NVS
+    midi_error_t err = config_manager_save(&g_app.sys_config);
+    if (err != MIDI_OK) {
+        ESP_LOGE(TAG, "Failed to save WiFi config: %s", midi_error_str(err));
+        return err;
+    }
+    
+    ESP_LOGI(TAG, "WiFi config updated: SSID=%s", ssid);
+    return MIDI_OK;
+}
+
+midi_error_t app_core_update_midi_config(const char* device_name, uint16_t listen_port) {
+    if (!g_app.initialized) {
+        return MIDI_ERR_NOT_INITIALIZED;
+    }
+    if (!device_name) {
+        return MIDI_ERR_INVALID_ARG;
+    }
+    
+    // 更新内存中的配置
+    strncpy(g_app.sys_config.midi.device_name, device_name, sizeof(g_app.sys_config.midi.device_name) - 1);
+    g_app.sys_config.midi.listen_port = listen_port;
+    
+    // 更新运行时配置指针
+    g_app.config.device_name = g_app.sys_config.midi.device_name;
+    g_app.config.listen_port = g_app.sys_config.midi.listen_port;
+    
+    // 保存到 NVS
+    midi_error_t err = config_manager_save(&g_app.sys_config);
+    if (err != MIDI_OK) {
+        ESP_LOGE(TAG, "Failed to save MIDI config: %s", midi_error_str(err));
+        return err;
+    }
+    
+    ESP_LOGI(TAG, "MIDI config updated: Name=%s, Port=%d", device_name, listen_port);
+    return MIDI_OK;
 }

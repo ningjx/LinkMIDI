@@ -32,7 +32,7 @@ typedef struct {
     uint16_t port;
     char device_name[64];
     char product_id[64];
-    uint8_t ssrc;
+    uint32_t ssrc;              ///< SSRC (32-bit)
 } discovered_device_t;
 
 typedef struct network_midi2_context {
@@ -53,8 +53,8 @@ typedef struct network_midi2_context {
     network_midi2_session_state_t session_state;
     uint16_t send_sequence;
     
-    // Local SSRC
-    uint8_t local_ssrc;
+    // Local SSRC (32-bit)
+    uint32_t local_ssrc;
     
     // Discovered devices
     discovered_device_t discovered_devices[MAX_DISCOVERED_DEVICES];
@@ -146,8 +146,11 @@ network_midi2_context_t* network_midi2_init_with_config(
     ctx->send_sequence = 0;
     ctx->discovered_count = 0;
     
-    // Generate random SSRC
-    ctx->local_ssrc = (uint8_t)(rand() % 254 + 1);
+    // Generate random 32-bit SSRC (MIDI 2.0 spec)
+    ctx->local_ssrc = ((uint32_t)rand() << 16) | ((uint32_t)rand() & 0xFFFF);
+    if (ctx->local_ssrc == 0) {
+        ctx->local_ssrc = 1;  // SSRC must not be zero
+    }
     
     // Create session mutex
     ctx->session_mutex = xSemaphoreCreateMutex();
@@ -157,8 +160,8 @@ network_midi2_context_t* network_midi2_init_with_config(
         return NULL;
     }
     
-    network_midi2_logf(NULL, "[Init] Device: %s, Port: %d, SSRC: %02X",
-                       config->device_name, ctx->listen_port, ctx->local_ssrc);
+    network_midi2_logf(NULL, "[Init] Device: %s, Port: %d, SSRC: 0x%08lX",
+                       config->device_name, ctx->listen_port, (unsigned long)ctx->local_ssrc);
     
     return ctx;
 }
@@ -464,9 +467,15 @@ static void network_midi2_create_invitation_packet(network_midi2_context_t* ctx,
     packet[offset++] = 0x01;
     // Status: 0x00 (inquiry)
     packet[offset++] = 0x00;
-    // Local SSRC
-    packet[offset++] = ctx->local_ssrc;
-    // Remote SSRC (0 for invitation)
+    // Local SSRC (4 bytes, big-endian)
+    packet[offset++] = (ctx->local_ssrc >> 24) & 0xFF;
+    packet[offset++] = (ctx->local_ssrc >> 16) & 0xFF;
+    packet[offset++] = (ctx->local_ssrc >> 8) & 0xFF;
+    packet[offset++] = ctx->local_ssrc & 0xFF;
+    // Remote SSRC (0 for invitation, 4 bytes)
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
     packet[offset++] = 0x00;
     
     // Device name length (2 bytes)
@@ -537,8 +546,8 @@ bool network_midi2_session_initiate(
     
     xSemaphoreGive(ctx->session_mutex);
     
-    network_midi2_logf(ctx, "[Session] Sent INV to %08X:%d (SSRC: %02X -> ?)",
-                      ip_address, port, ctx->local_ssrc);
+    network_midi2_logf(ctx, "[Session] Sent INV to %08lX:%d (SSRC: 0x%08lX -> ?)",
+                      (unsigned long)ip_address, port, (unsigned long)ctx->local_ssrc);
     
     return true;
 }
@@ -555,11 +564,19 @@ bool network_midi2_session_accept(network_midi2_context_t* ctx) {
         return false;
     }
     
-    uint8_t packet[4];
+    uint8_t packet[12];
     packet[0] = 0x01;  // INV command
     packet[1] = 0x01;  // Status: accept
-    packet[2] = ctx->local_ssrc;
-    packet[3] = ctx->current_session.remote_ssrc;
+    // Local SSRC (4 bytes, big-endian)
+    packet[2] = (ctx->local_ssrc >> 24) & 0xFF;
+    packet[3] = (ctx->local_ssrc >> 16) & 0xFF;
+    packet[4] = (ctx->local_ssrc >> 8) & 0xFF;
+    packet[5] = ctx->local_ssrc & 0xFF;
+    // Remote SSRC (4 bytes, big-endian)
+    packet[6] = (ctx->current_session.remote_ssrc >> 24) & 0xFF;
+    packet[7] = (ctx->current_session.remote_ssrc >> 16) & 0xFF;
+    packet[8] = (ctx->current_session.remote_ssrc >> 8) & 0xFF;
+    packet[9] = ctx->current_session.remote_ssrc & 0xFF;
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
@@ -578,8 +595,8 @@ bool network_midi2_session_accept(network_midi2_context_t* ctx) {
     
     xSemaphoreGive(ctx->session_mutex);
     
-    network_midi2_logf(ctx, "[Session] Session accepted! SSRC: %02X <-> %02X",
-                      ctx->local_ssrc, ctx->current_session.remote_ssrc);
+    network_midi2_logf(ctx, "[Session] Session accepted! SSRC: 0x%08lX <-> 0x%08lX",
+                      (unsigned long)ctx->local_ssrc, (unsigned long)ctx->current_session.remote_ssrc);
     
     return true;
 }
@@ -596,18 +613,26 @@ bool network_midi2_session_reject(network_midi2_context_t* ctx) {
         return false;
     }
     
-    uint8_t packet[4];
+    uint8_t packet[10];
     packet[0] = 0x01;  // INV command
     packet[1] = 0x02;  // Status: reject
-    packet[2] = ctx->local_ssrc;
-    packet[3] = ctx->current_session.remote_ssrc;
+    // Local SSRC (4 bytes, big-endian)
+    packet[2] = (ctx->local_ssrc >> 24) & 0xFF;
+    packet[3] = (ctx->local_ssrc >> 16) & 0xFF;
+    packet[4] = (ctx->local_ssrc >> 8) & 0xFF;
+    packet[5] = ctx->local_ssrc & 0xFF;
+    // Remote SSRC (4 bytes, big-endian)
+    packet[6] = (ctx->current_session.remote_ssrc >> 24) & 0xFF;
+    packet[7] = (ctx->current_session.remote_ssrc >> 16) & 0xFF;
+    packet[8] = (ctx->current_session.remote_ssrc >> 8) & 0xFF;
+    packet[9] = ctx->current_session.remote_ssrc & 0xFF;
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    sendto(ctx->data_socket, packet, 4, 0,
+    sendto(ctx->data_socket, packet, 10, 0,
            (struct sockaddr*)&addr, sizeof(addr));
     
     ctx->session_state = SESSION_STATE_IDLE;

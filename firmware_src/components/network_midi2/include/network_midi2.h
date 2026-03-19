@@ -68,8 +68,8 @@ typedef struct {
     char product_id[64];          ///< Product identifier
     uint32_t ip_address;          ///< Remote device IP (network byte order)
     uint16_t port;                ///< Remote device UDP port
-    uint8_t local_ssrc;           ///< Local SSRC (Synchronization Source)
-    uint8_t remote_ssrc;          ///< Remote SSRC
+    uint32_t local_ssrc;          ///< Local SSRC (Synchronization Source, 32-bit)
+    uint32_t remote_ssrc;         ///< Remote SSRC (32-bit)
     uint16_t sequence_number;     ///< Current sequence number for UMP data
     network_midi2_session_state_t state;
 } network_midi2_session_t;

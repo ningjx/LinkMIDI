@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 #include "midi_error.h"
+#include "config_manager.h"  // 引入 system_config_t
 
 #ifdef __cplusplus
 extern "C" {
@@ -61,6 +62,28 @@ bool app_core_is_running(void);
  * @return true 会话激活
  */
 bool app_core_is_session_active(void);
+
+/**
+ * @brief 获取当前系统配置
+ * @return 系统配置指针（只读）
+ */
+const system_config_t* app_core_get_config(void);
+
+/**
+ * @brief 更新 WiFi 配置并保存
+ * @param ssid WiFi SSID
+ * @param password WiFi 密码
+ * @return MIDI_OK 成功
+ */
+midi_error_t app_core_update_wifi_config(const char* ssid, const char* password);
+
+/**
+ * @brief 更新 MIDI 配置并保存
+ * @param device_name 设备名称
+ * @param listen_port 监听端口
+ * @return MIDI_OK 成功
+ */
+midi_error_t app_core_update_midi_config(const char* device_name, uint16_t listen_port);
 
 #ifdef __cplusplus
 }

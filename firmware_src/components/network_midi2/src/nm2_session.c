@@ -28,7 +28,7 @@ struct nm2_session {
  * 公共 API
  * ============================================================================ */
 
-nm2_session_t* nm2_session_create(uint8_t local_ssrc) {
+nm2_session_t* nm2_session_create(uint32_t local_ssrc) {
     nm2_session_t* session = calloc(1, sizeof(nm2_session_t));
     if (!session) return NULL;
     
@@ -82,14 +82,22 @@ midi_error_t nm2_session_initiate(nm2_session_t* session, int socket,
         return MIDI_ERR_SESSION_ALREADY_ACTIVE;
     }
     
-    // 创建 INV 包
+    // 创建 INV 包 (SSRC 为 4 字节大端序)
     uint8_t packet[36];
     int offset = 0;
     
     packet[offset++] = 0x01;  // INV command
     packet[offset++] = 0x00;  // Status
-    packet[offset++] = session->info.local_ssrc;
-    packet[offset++] = 0x00;  // Placeholder
+    // Local SSRC (4 bytes, big-endian)
+    packet[offset++] = (session->info.local_ssrc >> 24) & 0xFF;
+    packet[offset++] = (session->info.local_ssrc >> 16) & 0xFF;
+    packet[offset++] = (session->info.local_ssrc >> 8) & 0xFF;
+    packet[offset++] = session->info.local_ssrc & 0xFF;
+    // Remote SSRC placeholder (4 bytes)
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
+    packet[offset++] = 0x00;
     
     // 发送
     struct sockaddr_in addr = {0};
@@ -129,14 +137,22 @@ midi_error_t nm2_session_accept(nm2_session_t* session, int socket) {
         return MIDI_ERR_SESSION_NOT_ACTIVE;
     }
     
-    // 创建 OK 包
-    uint8_t packet[36];
+    // 创建 OK 包 (SSRC 为 4 字节大端序)
+    uint8_t packet[12];
     int offset = 0;
     
     packet[offset++] = 0x02;  // OK command
     packet[offset++] = 0x00;  // Status
-    packet[offset++] = session->info.local_ssrc;
-    packet[offset++] = session->info.remote_ssrc;
+    // Local SSRC (4 bytes, big-endian)
+    packet[offset++] = (session->info.local_ssrc >> 24) & 0xFF;
+    packet[offset++] = (session->info.local_ssrc >> 16) & 0xFF;
+    packet[offset++] = (session->info.local_ssrc >> 8) & 0xFF;
+    packet[offset++] = session->info.local_ssrc & 0xFF;
+    // Remote SSRC (4 bytes, big-endian)
+    packet[offset++] = (session->info.remote_ssrc >> 24) & 0xFF;
+    packet[offset++] = (session->info.remote_ssrc >> 16) & 0xFF;
+    packet[offset++] = (session->info.remote_ssrc >> 8) & 0xFF;
+    packet[offset++] = session->info.remote_ssrc & 0xFF;
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
@@ -167,14 +183,22 @@ midi_error_t nm2_session_reject(nm2_session_t* session, int socket) {
         return MIDI_ERR_TIMEOUT;
     }
     
-    // 创建 NO 包
-    uint8_t packet[36];
+    // 创建 NO 包 (SSRC 为 4 字节大端序)
+    uint8_t packet[12];
     int offset = 0;
     
     packet[offset++] = 0x03;  // NO command
     packet[offset++] = 0x00;
-    packet[offset++] = session->info.local_ssrc;
-    packet[offset++] = session->info.remote_ssrc;
+    // Local SSRC (4 bytes, big-endian)
+    packet[offset++] = (session->info.local_ssrc >> 24) & 0xFF;
+    packet[offset++] = (session->info.local_ssrc >> 16) & 0xFF;
+    packet[offset++] = (session->info.local_ssrc >> 8) & 0xFF;
+    packet[offset++] = session->info.local_ssrc & 0xFF;
+    // Remote SSRC (4 bytes, big-endian)
+    packet[offset++] = (session->info.remote_ssrc >> 24) & 0xFF;
+    packet[offset++] = (session->info.remote_ssrc >> 16) & 0xFF;
+    packet[offset++] = (session->info.remote_ssrc >> 8) & 0xFF;
+    packet[offset++] = session->info.remote_ssrc & 0xFF;
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;

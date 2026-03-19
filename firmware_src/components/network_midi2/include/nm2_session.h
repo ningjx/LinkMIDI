@@ -38,8 +38,8 @@ typedef struct {
     char product_id[64];        ///< 产品 ID
     uint32_t ip_address;        ///< IP 地址 (网络字节序)
     uint16_t port;              ///< UDP 端口
-    uint8_t local_ssrc;         ///< 本地 SSRC
-    uint8_t remote_ssrc;        ///< 远端 SSRC
+    uint32_t local_ssrc;         ///< 本地 SSRC (32-bit)
+    uint32_t remote_ssrc;        ///< 远端 SSRC (32-bit)
     uint16_t sequence_number;   ///< 序列号
     nm2_session_state_t state;  ///< 会话状态
 } nm2_session_info_t;
@@ -61,7 +61,7 @@ typedef void (*nm2_session_event_cb)(nm2_session_state_t state, const nm2_sessio
 /**
  * @brief 创建会话上下文
  */
-nm2_session_t* nm2_session_create(uint8_t local_ssrc);
+nm2_session_t* nm2_session_create(uint32_t local_ssrc);
 
 /**
  * @brief 销毁会话上下文
