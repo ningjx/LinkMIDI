@@ -177,6 +177,72 @@ bool usb_midi_host_is_running(usb_midi_host_context_t* ctx);
 int usb_midi_host_get_endpoint_count(usb_midi_host_context_t* ctx,
                                      uint8_t device_index);
 
+/* ============================================================================
+ * MIDI Send Functions (OUT to device)
+ * ============================================================================ */
+
+/**
+ * @brief Send raw MIDI data to a connected device
+ * 
+ * @param ctx Context handle
+ * @param device_index Target device index (0-based)
+ * @param data MIDI data bytes
+ * @param length Number of bytes
+ * @return true on success
+ */
+bool usb_midi_host_send(usb_midi_host_context_t* ctx,
+                        uint8_t device_index,
+                        const uint8_t* data,
+                        uint16_t length);
+
+/**
+ * @brief Send a Note On message
+ * 
+ * @param ctx Context handle
+ * @param device_index Target device index
+ * @param note Note number (0-127)
+ * @param velocity Velocity (0-127)
+ * @param channel MIDI channel (0-15)
+ * @return true on success
+ */
+bool usb_midi_host_send_note_on(usb_midi_host_context_t* ctx,
+                                uint8_t device_index,
+                                uint8_t note,
+                                uint8_t velocity,
+                                uint8_t channel);
+
+/**
+ * @brief Send a Note Off message
+ * 
+ * @param ctx Context handle
+ * @param device_index Target device index
+ * @param note Note number (0-127)
+ * @param velocity Velocity (0-127)
+ * @param channel MIDI channel (0-15)
+ * @return true on success
+ */
+bool usb_midi_host_send_note_off(usb_midi_host_context_t* ctx,
+                                 uint8_t device_index,
+                                 uint8_t note,
+                                 uint8_t velocity,
+                                 uint8_t channel);
+
+/**
+ * @brief Send a Control Change message
+ * 
+ * @param ctx Context handle
+ * @param device_index Target device index
+ * @param controller Controller number (0-127)
+ * @param value Value (0-127)
+ * @param channel MIDI channel (0-15)
+ * @return true on success
+ */
+bool usb_midi_host_send_control_change(usb_midi_host_context_t* ctx,
+                                       uint8_t device_index,
+                                       uint8_t controller,
+                                       uint8_t value,
+                                       uint8_t channel);
+
 #ifdef __cplusplus
 }
 #endif
