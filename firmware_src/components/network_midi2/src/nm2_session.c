@@ -565,7 +565,8 @@ midi_error_t nm2_session_send_keepalive(nm2_session_t* session, int socket) {
     
     // 使用新协议模块构建 PING 包
     uint8_t packet[NM2_MAX_PACKET_SIZE];
-    int packet_len = nm2_protocol_build_ping(packet, sizeof(packet));
+    uint32_t ping_id = esp_random();  // 生成随机 ping ID
+    int packet_len = nm2_protocol_build_ping(packet, sizeof(packet), ping_id);
     
     if (packet_len < 0) {
         ESP_LOGE(TAG, "Failed to build PING packet");
