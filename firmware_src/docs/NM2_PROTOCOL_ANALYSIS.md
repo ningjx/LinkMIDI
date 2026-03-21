@@ -2,12 +2,77 @@
 
 ## 文档信息
 - **创建日期**: 2026-03-21
+- **更新日期**: 2026-03-22
 - **参考规范**: M2-124-UM_v1-0-1_Network-MIDI-2-0-UDP.pdf
 - **参考实现**: D:\WorkSpace\MidiBridge\Test (C# 已验证功能正常)
 
 ---
 
-## 一、协议概述
+## 一、实现状态总览
+
+### 📊 实现完成度: **约 85%** (更新后)
+
+| 类别 | 完成度 | 状态 |
+|------|--------|------|
+| UDP 包格式 | 100% | ✅ 已实现签名和命令包结构 |
+| 命令码定义 | 100% | ✅ 所有命令码已定义 |
+| 邀请流程 | 90% | ✅ INV/INV_ACCEPTED/INV_REJECTED 已实现 |
+| 保活机制 | 100% | ✅ PING/PING_REPLY 已实现 |
+| 会话终止 | 100% | ✅ BYE/BYE_REPLY 已实现 |
+| UMP 数据传输 | 100% | ✅ 序列号处理正确 |
+| 重传机制 | 80% | ✅ 缓冲区已实现，处理逻辑待完善 |
+| 会话重置 | 100% | ✅ SESSION_RESET 已实现 |
+| 错误处理 | 100% | ✅ NAK 已实现 |
+| 认证机制 | 0% | ❌ 未实现 |
+
+---
+
+## 二、已完成的优化 (2026-03-22)
+
+### 2.1 重传缓冲区 ✅
+
+新增 `nm2_retransmit_buffer_t` 结构和相关 API：
+
+```c
+// 缓冲区结构
+typedef struct {
+    nm2_packet_cache_entry_t entries[NM2_RETRANSMIT_CACHE_SIZE];
+    uint16_t count;
+    uint16_t head;
+} nm2_retransmit_buffer_t;
+
+// API 函数
+void nm2_retransmit_buffer_init(nm2_retransmit_buffer_t* buf);
+bool nm2_retransmit_buffer_add(nm2_retransmit_buffer_t* buf, uint16_t sequence, const uint8_t* data, uint16_t length);
+int nm2_retransmit_buffer_get(nm2_retransmit_buffer_t* buf, uint16_t sequence, uint8_t* data, uint16_t max_len);
+void nm2_retransmit_buffer_clean(nm2_retransmit_buffer_t* buf, uint32_t max_age_ms);
+void nm2_retransmit_buffer_clear(nm2_retransmit_buffer_t* buf);
+```
+
+### 2.2 会话 ID 生成 ✅
+
+```c
+uint32_t nm2_protocol_generate_session_id(void);
+uint32_t nm2_session_get_id(const nm2_session_t* session);
+```
+
+### 2.3 序列号工具函数 ✅
+
+```c
+bool nm2_protocol_is_sequence_newer(uint16_t new_seq, uint16_t old_seq);
+int32_t nm2_protocol_sequence_diff(uint16_t new_seq, uint16_t old_seq);
+```
+
+### 2.4 SESSION_RESET 处理 ✅
+
+```c
+midi_error_t nm2_session_handle_reset(nm2_session_t* session, int socket, const uint8_t* data, int length);
+midi_error_t nm2_session_reset(nm2_session_t* session);
+```
+
+---
+
+## 三、协议概述
 
 Network MIDI 2.0 (NM2) 是 MIDI 协会定义的基于 UDP 的 MIDI 2.0 网络传输协议，主要包含三个部分：
 
@@ -17,87 +82,141 @@ Network MIDI 2.0 (NM2) 是 MIDI 协会定义的基于 UDP 的 MIDI 2.0 网络传
 
 ---
 
-## 二、当前实现与规范的差异分析
+## 四、命令码实现状态
 
-### 2.1 UDP 包格式
-
-#### 规范要求
-```
-+----------------+----------------+----------------+----------------+
-|  Signature (0x4D494449 = "MIDI") - 4 bytes                    |
-+----------------+----------------+----------------+----------------+
-|  Command Packet 1                                              |
-|  ...                                                           |
-+----------------+----------------+----------------+----------------+
-|  Command Packet N                                              |
-+----------------+----------------+----------------+----------------+
-```
-
-每个 UDP 包必须以 4 字节签名 `0x4D494449` (ASCII: "MIDI") 开头，后跟一个或多个命令包。
-
-#### 当前实现问题
-- ❌ **未实现签名**: `network_midi2.c` 和 `nm2_transport.c` 中发送的数据包没有包含 "MIDI" 签名
-- ❌ **无法与标准实现互操作**: 缺少签名会导致其他标准实现拒绝接收数据包
-
-### 2.2 命令包格式
-
-#### 规范要求
-```
-+--------+--------+--------+--------+--------+--------+--------+--------+
-| CmdCode|PayLen  |Specific1|Specific2|      Payload (PayLen * 4 bytes) |
-+--------+--------+--------+--------+--------+--------+--------+--------+
-```
-
-- **CmdCode (1 byte)**: 命令码
-- **PayLen (1 byte)**: 负载长度（以 4 字节字为单位）
-- **Specific1 (1 byte)**: 命令特定字段 1
-- **Specific2 (1 byte)**: 命令特定字段 2
-- **Payload**: 可变长度负载
-
-#### 当前实现问题
-- ⚠️ **格式不一致**: 不同模块使用不同的包格式
-- ❌ **缺少统一的包构建/解析函数**
-
-### 2.3 命令码对比
-
-| 功能 | 规范命令码 | 当前实现 | 状态 |
-|------|-----------|---------|------|
+| 功能 | 规范命令码 | 实现状态 |
+|------|-----------|---------|
 | **会话管理** |
-| INV (邀请) | 0x01 | 0x01 | ✅ 正确 |
-| INV_WITH_AUTH (带认证邀请) | 0x02 | - | ❌ 未实现 |
-| INV_WITH_USER_AUTH (带用户认证邀请) | 0x03 | - | ❌ 未实现 |
-| INV_ACCEPTED (邀请接受) | 0x10 | 0x02 | ❌ 错误 |
-| INV_PENDING (邀请等待) | 0x11 | - | ❌ 未实现 |
-| INV_AUTH_REQUIRED (需要认证) | 0x12 | - | ❌ 未实现 |
-| INV_USER_AUTH_REQUIRED (需要用户认证) | 0x13 | - | ❌ 未实现 |
+| INV (邀请) | 0x01 | ✅ 已实现 |
+| INV_WITH_AUTH (带认证邀请) | 0x02 | ⏳ 待实现 |
+| INV_WITH_USER_AUTH (带用户认证邀请) | 0x03 | ⏳ 待实现 |
+| INV_ACCEPTED (邀请接受) | 0x10 | ✅ 已实现 |
+| INV_PENDING (邀请等待) | 0x11 | ⏳ 待实现 |
+| INV_AUTH_REQUIRED (需要认证) | 0x12 | ⏳ 待实现 |
+| INV_USER_AUTH_REQUIRED (需要用户认证) | 0x13 | ⏳ 待实现 |
 | **心跳与维护** |
-| PING | 0x20 | 0x00 | ❌ 错误 |
-| PING_REPLY (PONG) | 0x21 | - | ❌ 未实现 |
+| PING | 0x20 | ✅ 已实现 |
+| PING_REPLY (PONG) | 0x21 | ✅ 已实现 |
 | **重传机制** |
-| RETRANSMIT_REQUEST | 0x80 | - | ❌ 未实现 |
-| RETRANSMIT_ERROR | 0x81 | - | ❌ 未实现 |
-| SESSION_RESET | 0x82 | - | ❌ 未实现 |
-| SESSION_RESET_REPLY | 0x83 | - | ❌ 未实现 |
+| RETRANSMIT_REQUEST | 0x80 | ⚠️ 结构已定义，处理逻辑待实现 |
+| RETRANSMIT_ERROR | 0x81 | ⚠️ 结构已定义，处理逻辑待实现 |
+| SESSION_RESET | 0x82 | ✅ 已实现 |
+| SESSION_RESET_REPLY | 0x83 | ✅ 已实现 |
 | **错误处理** |
-| NAK (否定确认) | 0x8F | - | ❌ 未实现 |
+| NAK (否定确认) | 0x8F | ✅ 已实现 |
 | **会话终止** |
-| BYE | 0xF0 | 0x04 | ❌ 错误 |
-| BYE_REPLY | 0xF1 | - | ❌ 未实现 |
+| BYE | 0xF0 | ✅ 已实现 |
+| BYE_REPLY | 0xF1 | ✅ 已实现 |
 | **数据传输** |
-| UMP Data | 0xFF | 0x10 | ❌ 错误 |
+| UMP Data | 0xFF | ✅ 已实现 |
 
-### 2.4 会话管理功能
+---
 
-#### 规范要求的会话状态
+## 五、后续功能实现计划
+
+### 5.1 高优先级 (P0)
+
+| 任务 | 说明 | 预计工作量 |
+|------|------|-----------|
+| 重传请求处理 | 在 nm2_transport.c 中实现 RETRANSMIT_REQUEST 处理逻辑 | 2h |
+| 集成重传缓冲区 | 将重传缓冲区集成到会话结构中 | 1h |
+
+### 5.2 中优先级 (P1)
+
+| 任务 | 说明 | 预计工作量 |
+|------|------|-----------|
+| INV_PENDING 支持 | 实现异步邀请响应流程 | 2h |
+| 协议版本协商 | 在 INV 包中添加版本列表支持 | 1h |
+| 保活定时器 | 实现自动 PING 定时器 | 1h |
+
+### 5.3 低优先级 (P2)
+
+| 任务 | 说明 | 预计工作量 |
+|------|------|-----------|
+| 共享密钥认证 | 实现 INV_AUTH_REQUIRED 流程 | 4h |
+| 用户认证 | 实现 INV_USER_AUTH_REQUIRED 流程 | 4h |
+| 认证配置界面 | 添加认证配置 API | 2h |
+
+---
+
+## 六、架构设计
+
+### 6.1 模块依赖关系
+
 ```
-IDLE -> INVITING -> PENDING -> ESTABLISHED -> TERMINATING -> IDLE
+┌─────────────────────────────────────────────────────────────┐
+│                     Application Layer                        │
+│                   (network_midi2.c)                          │
+└─────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│  nm2_session.c  │ │ nm2_transport.c │ │ nm2_discovery.c │
+│   会话管理       │ │    数据传输     │ │    设备发现     │
+└─────────────────┘ └─────────────────┘ └─────────────────┘
+              │               │               │
+              └───────────────┼───────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    nm2_protocol.c                           │
+│              协议格式处理 (独立模块)                          │
+│  - UDP 签名验证                                              │
+│  - 命令包构建/解析                                           │
+│  - 重传缓冲区管理                                            │
+│  - 序列号工具                                                │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-#### 当前实现问题
+### 6.2 新增 API 汇总
 
-| 功能 | 规范要求 | 当前实现 | 状态 |
-|------|---------|---------|------|
-| 基本邀请流程 | INV -> INV_ACCEPTED | INV -> OK | ⚠️ 命令码错误 |
+```c
+// 会话 ID 生成
+uint32_t nm2_protocol_generate_session_id(void);
+uint32_t nm2_session_get_id(const nm2_session_t* session);
+
+// 序列号工具
+bool nm2_protocol_is_sequence_newer(uint16_t new_seq, uint16_t old_seq);
+int32_t nm2_protocol_sequence_diff(uint16_t new_seq, uint16_t old_seq);
+
+// 重传缓冲区
+void nm2_retransmit_buffer_init(nm2_retransmit_buffer_t* buf);
+bool nm2_retransmit_buffer_add(nm2_retransmit_buffer_t* buf, uint16_t sequence, const uint8_t* data, uint16_t length);
+int nm2_retransmit_buffer_get(nm2_retransmit_buffer_t* buf, uint16_t sequence, uint8_t* data, uint16_t max_len);
+void nm2_retransmit_buffer_clean(nm2_retransmit_buffer_t* buf, uint32_t max_age_ms);
+void nm2_retransmit_buffer_clear(nm2_retransmit_buffer_t* buf);
+
+// 会话重置
+midi_error_t nm2_session_handle_reset(nm2_session_t* session, int socket, const uint8_t* data, int length);
+midi_error_t nm2_session_reset(nm2_session_t* session);
+```
+
+---
+
+## 七、测试建议
+
+### 7.1 单元测试
+
+- [ ] 测试 UDP 签名验证
+- [ ] 测试命令包构建/解析
+- [ ] 测试序列号回绕处理
+- [ ] 测试重传缓冲区操作
+
+### 7.2 集成测试
+
+- [ ] 与 C# 参考实现互操作测试
+- [ ] 会话建立/终止流程测试
+- [ ] UMP 数据传输测试
+- [ ] 重传机制测试
+
+---
+
+## 八、变更历史
+
+| 日期 | 版本 | 变更内容 |
+|------|------|---------|
+| 2026-03-21 | 1.0 | 初始分析文档 |
+| 2026-03-22 | 1.1 | 完成高优先级优化：重传缓冲区、会话ID生成、SESSION_RESET处理 |
 | 邀请拒绝 | INV -> INV_REJECTED (NO) | NO (0x03) | ⚠️ 规范无此命令 |
 | 认证邀请 | INV_WITH_AUTH | - | ❌ 未实现 |
 | 用户认证邀请 | INV_WITH_USER_AUTH | - | ❌ 未实现 |

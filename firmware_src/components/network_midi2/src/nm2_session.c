@@ -21,6 +21,7 @@ static const char* TAG = "NM2_SESS";
 
 struct nm2_session {
     nm2_session_info_t info;
+    uint32_t session_id;            ///< 会话 ID (随机生成)
     SemaphoreHandle_t mutex;
     nm2_session_event_cb event_callback;
     void* event_user_data;
@@ -42,6 +43,7 @@ nm2_session_t* nm2_session_create(uint32_t local_ssrc) {
     
     session->info.local_ssrc = local_ssrc;
     session->info.state = NM2_SESSION_IDLE;
+    session->session_id = nm2_protocol_generate_session_id();
     
     return session;
 }
@@ -361,4 +363,70 @@ uint16_t nm2_session_next_sequence(nm2_session_t* session) {
         seq = 0;
     }
     return seq;
+}
+
+midi_error_t nm2_session_handle_reset(nm2_session_t* session, int socket, const uint8_t* data, int length) {
+    if (!session) return MIDI_ERR_INVALID_ARG;
+    
+    // 解析 SESSION_RESET 包
+    nm2_command_packet_t cmd;
+    int parsed = nm2_protocol_parse_packet(data, length, &cmd, 1);
+    
+    if (parsed < 1 || cmd.command != NM2_CMD_SESSION_RESET) {
+        ESP_LOGW(TAG, "Invalid SESSION_RESET packet");
+        return MIDI_ERR_INVALID_ARG;
+    }
+    
+    if (xSemaphoreTake(session->mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return MIDI_ERR_TIMEOUT;
+    }
+    
+    // 重置序列号
+    session->info.sequence_number = 1;
+    
+    xSemaphoreGive(session->mutex);
+    
+    // 发送 SESSION_RESET_REPLY
+    uint8_t reply[NM2_MAX_PACKET_SIZE];
+    int reply_len = nm2_protocol_build_session_reset_reply(reply, sizeof(reply));
+    
+    if (reply_len > 0 && socket >= 0 && session->info.ip_address != 0) {
+        struct sockaddr_in addr = {0};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = session->info.ip_address;
+        addr.sin_port = htons(session->info.port);
+        sendto(socket, reply, reply_len, 0, (struct sockaddr*)&addr, sizeof(addr));
+    }
+    
+    ESP_LOGI(TAG, "Session reset completed");
+    
+    // 通知上层应用
+    notify_event(session);
+    
+    return MIDI_OK;
+}
+
+midi_error_t nm2_session_reset(nm2_session_t* session) {
+    if (!session) return MIDI_ERR_INVALID_ARG;
+    
+    if (xSemaphoreTake(session->mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return MIDI_ERR_TIMEOUT;
+    }
+    
+    // 重置序列号
+    session->info.sequence_number = 1;
+    
+    // 生成新的会话 ID
+    session->session_id = nm2_protocol_generate_session_id();
+    
+    xSemaphoreGive(session->mutex);
+    
+    ESP_LOGI(TAG, "Session reset (new ID: 0x%08X)", (unsigned int)session->session_id);
+    
+    return MIDI_OK;
+}
+
+uint32_t nm2_session_get_id(const nm2_session_t* session) {
+    if (!session) return 0;
+    return session->session_id;
 }

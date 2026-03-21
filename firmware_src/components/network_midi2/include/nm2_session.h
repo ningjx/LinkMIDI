@@ -126,9 +126,24 @@ midi_error_t nm2_session_handle_inv_response(nm2_session_t* session, const uint8
 midi_error_t nm2_session_handle_termination(nm2_session_t* session, const uint8_t* data, int length);
 
 /**
+ * @brief 处理会话重置请求
+ */
+midi_error_t nm2_session_handle_reset(nm2_session_t* session, int socket, const uint8_t* data, int length);
+
+/**
+ * @brief 重置会话状态 (不终止会话)
+ */
+midi_error_t nm2_session_reset(nm2_session_t* session);
+
+/**
  * @brief 更新序列号
  */
 uint16_t nm2_session_next_sequence(nm2_session_t* session);
+
+/**
+ * @brief 获取会话 ID
+ */
+uint32_t nm2_session_get_id(const nm2_session_t* session);
 
 #ifdef __cplusplus
 }

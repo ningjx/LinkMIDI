@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "mbedtls/sha256.h"
 
 static const char* TAG = "NM2_PROTO";
@@ -867,4 +868,132 @@ const char* nm2_protocol_nak_reason_name(nm2_nak_reason_t reason) {
         case NM2_NAK_BAD_PING_REPLY:     return "Bad Ping Reply";
         default:                         return "Unknown";
     }
+}
+
+/* ============================================================================
+ * Session ID Generation
+ * ============================================================================ */
+
+uint32_t nm2_protocol_generate_session_id(void) {
+    uint32_t id;
+    do {
+        id = esp_random();
+    } while (id == 0);  // Session ID must not be zero
+    return id;
+}
+
+/* ============================================================================
+ * Sequence Number Utilities
+ * ============================================================================ */
+
+bool nm2_protocol_is_sequence_newer(uint16_t new_seq, uint16_t old_seq) {
+    // Handle wrap-around: sequence numbers are 16-bit unsigned
+    // A sequence is "newer" if the difference is positive and less than half the range
+    int32_t diff = (int32_t)new_seq - (int32_t)old_seq;
+    return diff > 0 && diff < 32768;
+}
+
+int32_t nm2_protocol_sequence_diff(uint16_t new_seq, uint16_t old_seq) {
+    // Calculate signed difference handling wrap-around
+    int32_t diff = (int32_t)new_seq - (int32_t)old_seq;
+    // Normalize to handle wrap-around
+    if (diff > 32767) {
+        diff -= 65536;
+    } else if (diff < -32768) {
+        diff += 65536;
+    }
+    return diff;
+}
+
+/* ============================================================================
+ * Retransmit Buffer Implementation
+ * ============================================================================ */
+
+void nm2_retransmit_buffer_init(nm2_retransmit_buffer_t* buf) {
+    if (!buf) return;
+    memset(buf, 0, sizeof(nm2_retransmit_buffer_t));
+}
+
+bool nm2_retransmit_buffer_add(nm2_retransmit_buffer_t* buf,
+                                uint16_t sequence,
+                                const uint8_t* data,
+                                uint16_t length) {
+    if (!buf || !data || length == 0 || length > NM2_MAX_PACKET_SIZE) {
+        return false;
+    }
+    
+    // Find an existing entry with this sequence or use the head position
+    int idx = -1;
+    
+    // First, check if we already have this sequence (update it)
+    for (int i = 0; i < NM2_RETRANSMIT_CACHE_SIZE; i++) {
+        if (buf->entries[i].valid && buf->entries[i].sequence == sequence) {
+            idx = i;
+            break;
+        }
+    }
+    
+    // If not found, use head position
+    if (idx < 0) {
+        idx = buf->head;
+        buf->head = (buf->head + 1) % NM2_RETRANSMIT_CACHE_SIZE;
+        
+        if (!buf->entries[idx].valid) {
+            buf->count++;
+        }
+    }
+    
+    // Store the packet
+    buf->entries[idx].sequence = sequence;
+    buf->entries[idx].length = length;
+    buf->entries[idx].timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    buf->entries[idx].valid = true;
+    memcpy(buf->entries[idx].data, data, length);
+    
+    return true;
+}
+
+int nm2_retransmit_buffer_get(nm2_retransmit_buffer_t* buf,
+                               uint16_t sequence,
+                               uint8_t* data,
+                               uint16_t max_len) {
+    if (!buf || !data) {
+        return -1;
+    }
+    
+    for (int i = 0; i < NM2_RETRANSMIT_CACHE_SIZE; i++) {
+        if (buf->entries[i].valid && buf->entries[i].sequence == sequence) {
+            if (buf->entries[i].length > max_len) {
+                return -2;  // Buffer too small
+            }
+            memcpy(data, buf->entries[i].data, buf->entries[i].length);
+            return buf->entries[i].length;
+        }
+    }
+    
+    return -1;  // Not found
+}
+
+void nm2_retransmit_buffer_clean(nm2_retransmit_buffer_t* buf,
+                                  uint32_t max_age_ms) {
+    if (!buf) return;
+    
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    
+    for (int i = 0; i < NM2_RETRANSMIT_CACHE_SIZE; i++) {
+        if (buf->entries[i].valid) {
+            uint32_t age = now_ms - buf->entries[i].timestamp_ms;
+            if (age > max_age_ms) {
+                buf->entries[i].valid = false;
+                buf->count--;
+            }
+        }
+    }
+}
+
+void nm2_retransmit_buffer_clear(nm2_retransmit_buffer_t* buf) {
+    if (!buf) return;
+    memset(buf->entries, 0, sizeof(buf->entries));
+    buf->count = 0;
+    buf->head = 0;
 }

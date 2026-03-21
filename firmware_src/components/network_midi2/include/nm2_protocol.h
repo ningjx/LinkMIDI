@@ -480,6 +480,109 @@ const char* nm2_protocol_bye_reason_name(nm2_bye_reason_t reason);
  */
 const char* nm2_protocol_nak_reason_name(nm2_nak_reason_t reason);
 
+/* ============================================================================
+ * Session ID Generation
+ * ============================================================================ */
+
+/**
+ * @brief Generate a random session ID
+ * @return Non-zero session ID
+ */
+uint32_t nm2_protocol_generate_session_id(void);
+
+/* ============================================================================
+ * Sequence Number Utilities
+ * ============================================================================ */
+
+/**
+ * @brief Check if a sequence number is newer (handles wrap-around)
+ * @param new_seq New sequence number
+ * @param old_seq Old sequence number
+ * @return true if new_seq is newer than old_seq
+ */
+bool nm2_protocol_is_sequence_newer(uint16_t new_seq, uint16_t old_seq);
+
+/**
+ * @brief Calculate sequence number difference (handles wrap-around)
+ * @param new_seq New sequence number
+ * @param old_seq Old sequence number
+ * @return Difference (positive if new_seq is newer)
+ */
+int32_t nm2_protocol_sequence_diff(uint16_t new_seq, uint16_t old_seq);
+
+/* ============================================================================
+ * Retransmit Buffer
+ * ============================================================================ */
+
+/** Maximum number of cached packets for retransmission */
+#define NM2_RETRANSMIT_CACHE_SIZE   64
+
+/**
+ * @brief Cached packet entry for retransmission
+ */
+typedef struct {
+    uint16_t sequence;              /**< Sequence number */
+    uint16_t length;                /**< Packet length */
+    uint32_t timestamp_ms;          /**< Send timestamp (milliseconds) */
+    uint8_t data[NM2_MAX_PACKET_SIZE]; /**< Packet data */
+    bool valid;                     /**< Entry is valid */
+} nm2_packet_cache_entry_t;
+
+/**
+ * @brief Retransmit buffer for caching sent packets
+ */
+typedef struct {
+    nm2_packet_cache_entry_t entries[NM2_RETRANSMIT_CACHE_SIZE];
+    uint16_t count;                 /**< Number of valid entries */
+    uint16_t head;                  /**< Next write position */
+} nm2_retransmit_buffer_t;
+
+/**
+ * @brief Initialize a retransmit buffer
+ * @param buf Buffer to initialize
+ */
+void nm2_retransmit_buffer_init(nm2_retransmit_buffer_t* buf);
+
+/**
+ * @brief Add a packet to the retransmit buffer
+ * @param buf Buffer to add to
+ * @param sequence Sequence number
+ * @param data Packet data
+ * @param length Packet length
+ * @return true if added successfully
+ */
+bool nm2_retransmit_buffer_add(nm2_retransmit_buffer_t* buf,
+                                uint16_t sequence,
+                                const uint8_t* data,
+                                uint16_t length);
+
+/**
+ * @brief Get a packet from the retransmit buffer
+ * @param buf Buffer to search
+ * @param sequence Sequence number to find
+ * @param data Output buffer for packet data
+ * @param max_len Maximum output buffer length
+ * @return Packet length, or negative if not found
+ */
+int nm2_retransmit_buffer_get(nm2_retransmit_buffer_t* buf,
+                               uint16_t sequence,
+                               uint8_t* data,
+                               uint16_t max_len);
+
+/**
+ * @brief Remove old entries from the buffer
+ * @param buf Buffer to clean
+ * @param max_age_ms Maximum age in milliseconds
+ */
+void nm2_retransmit_buffer_clean(nm2_retransmit_buffer_t* buf,
+                                  uint32_t max_age_ms);
+
+/**
+ * @brief Clear all entries from the buffer
+ * @param buf Buffer to clear
+ */
+void nm2_retransmit_buffer_clear(nm2_retransmit_buffer_t* buf);
+
 #ifdef __cplusplus
 }
 #endif
