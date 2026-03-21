@@ -3,6 +3,8 @@
  * @brief MIDI 2.0 传输子模块
  * 
  * 负责 UDP 数据传输：发送/接收 UMP 数据包。
+ * 
+ * 参考: Network MIDI 2.0 Implementation Guide - Using Sequence Numbers for Robustness and Recovery
  */
 
 #ifndef NM2_TRANSPORT_H
@@ -15,6 +17,12 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ============================================================================
+ * 前向声明
+ * ============================================================================ */
+
+typedef struct nm2_session nm2_session_t;
 
 /* ============================================================================
  * 类型定义
@@ -70,6 +78,11 @@ void nm2_transport_set_callbacks(nm2_transport_t* transport,
                                   nm2_ump_rx_callback_t ump_cb,
                                   nm2_midi_rx_callback_t midi_cb,
                                   void* user_data);
+
+/**
+ * @brief 设置会话上下文 (用于重传支持)
+ */
+void nm2_transport_set_session(nm2_transport_t* transport, nm2_session_t* session);
 
 /**
  * @brief 获取数据 socket (用于会话管理)

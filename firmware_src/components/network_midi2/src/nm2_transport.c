@@ -1,10 +1,13 @@
 /**
  * @file nm2_transport.c
  * @brief MIDI 2.0 传输实现
+ * 
+ * 参考: Network MIDI 2.0 Implementation Guide - Using Sequence Numbers for Robustness and Recovery
  */
 
 #include "nm2_transport.h"
 #include "nm2_protocol.h"
+#include "nm2_session.h"
 #include "midi_converter.h"
 #include <string.h>
 #include <errno.h>
@@ -12,6 +15,7 @@
 #include <fcntl.h>
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
@@ -37,6 +41,9 @@ struct nm2_transport {
     nm2_ump_rx_callback_t ump_callback;
     nm2_midi_rx_callback_t midi_callback;
     void* callback_user_data;
+    
+    // 会话上下文 (用于重传支持)
+    nm2_session_t* session;
 };
 
 /* ============================================================================
@@ -77,26 +84,96 @@ static void receive_task(void* arg) {
             continue;
         }
         
-        // UMP 数据 (cmd = 0xFF)
-        if (cmd.command == NM2_CMD_UMP_DATA && cmd.payload_len > 0) {
-            uint16_t seq = ((uint16_t)cmd.specific1 << 8) | cmd.specific2;
-            const uint8_t* ump = cmd.payload;
-            int ump_len = cmd.payload_len;
-            
-            ESP_LOGD(TAG, "RX UMP: seq=%d, len=%d", seq, ump_len);
-            
-            if (transport->ump_callback) {
-                transport->ump_callback(ump, ump_len, transport->callback_user_data);
-            }
-            
-            // 尝试转换为 MIDI 1.0
-            if (transport->midi_callback) {
-                uint8_t midi[3];
-                uint8_t midi_len;
-                if (nm2_ump_to_midi(ump, ump_len, midi, &midi_len)) {
-                    transport->midi_callback(midi, midi_len, transport->callback_user_data);
+        // 根据命令类型处理
+        switch (cmd.command) {
+            case NM2_CMD_UMP_DATA: {
+                // UMP 数据包
+                if (cmd.payload_len > 0) {
+                    uint16_t seq = ((uint16_t)cmd.specific1 << 8) | cmd.specific2;
+                    const uint8_t* ump = cmd.payload;
+                    int ump_len = cmd.payload_len;
+                    
+                    ESP_LOGD(TAG, "RX UMP: seq=%d, len=%d", seq, ump_len);
+                    
+                    // 更新最后接收的序列号
+                    if (transport->session) {
+                        nm2_session_update_last_received_seq(transport->session, seq);
+                    }
+                    
+                    if (transport->ump_callback) {
+                        transport->ump_callback(ump, ump_len, transport->callback_user_data);
+                    }
+                    
+                    // 尝试转换为 MIDI 1.0
+                    if (transport->midi_callback) {
+                        uint8_t midi[3];
+                        uint8_t midi_len;
+                        if (nm2_ump_to_midi(ump, ump_len, midi, &midi_len)) {
+                            transport->midi_callback(midi, midi_len, transport->callback_user_data);
+                        }
+                    }
                 }
+                break;
             }
+            
+            case NM2_CMD_RETRANSMIT_REQUEST: {
+                // 重传请求 (参考 MIDI.org 实现指南)
+                ESP_LOGD(TAG, "Received RETRANSMIT_REQUEST");
+                
+                if (transport->session && nm2_session_supports_retransmit(transport->session)) {
+                    nm2_retransmit_buffer_t* retransmit_buf = nm2_session_get_retransmit_buffer(transport->session);
+                    
+                    // 解析重传请求参数
+                    uint16_t first_seq = ((uint16_t)cmd.specific1 << 8) | cmd.specific2;
+                    uint16_t count = cmd.payload_len > 0 ? cmd.payload[0] : 1;
+                    
+                    ESP_LOGI(TAG, "Retransmit request: first_seq=%d, count=%d", first_seq, count);
+                    
+                    // 获取会话信息
+                    nm2_session_info_t info;
+                    if (!nm2_session_get_info(transport->session, &info)) {
+                        ESP_LOGW(TAG, "Failed to get session info");
+                        break;
+                    }
+                    
+                    // 从重传缓冲区获取数据包
+                    uint8_t retransmit_data[NM2_MAX_PACKET_SIZE];
+                    for (int i = 0; i < count; i++) {
+                        uint16_t seq = (first_seq + i) & 0xFFFF;
+                        int data_len = nm2_retransmit_buffer_get(retransmit_buf, seq,
+                                                                  retransmit_data, sizeof(retransmit_data));
+                        
+                        if (data_len > 0) {
+                            // 重传数据包
+                            midi_error_t err = nm2_transport_send_ump(transport, 
+                                                                       info.ip_address, info.port,
+                                                                       seq, retransmit_data, data_len);
+                            if (err == MIDI_OK) {
+                                ESP_LOGD(TAG, "Retransmitted seq=%d", seq);
+                            } else {
+                                ESP_LOGW(TAG, "Failed to retransmit seq=%d", seq);
+                            }
+                        } else {
+                            ESP_LOGW(TAG, "Retransmit entry not found for seq=%d", seq);
+                        }
+                    }
+                }
+                break;
+            }
+            
+            case NM2_CMD_SESSION_RESET: {
+                // 会话重置请求
+                ESP_LOGI(TAG, "Received SESSION_RESET");
+                if (transport->session) {
+                    nm2_session_handle_reset(transport->session, transport->socket, buffer, len);
+                }
+                break;
+            }
+            
+            default:
+                // 其他命令由上层处理
+                ESP_LOGD(TAG, "Received command: 0x%02X", cmd.command);
+                break;
         }
     }
     
@@ -206,6 +283,11 @@ void nm2_transport_set_callbacks(nm2_transport_t* transport,
     transport->callback_user_data = user_data;
 }
 
+void nm2_transport_set_session(nm2_transport_t* transport, nm2_session_t* session) {
+    if (!transport) return;
+    transport->session = session;
+}
+
 int nm2_transport_get_socket(const nm2_transport_t* transport) {
     return transport ? transport->socket : -1;
 }
@@ -225,6 +307,14 @@ midi_error_t nm2_transport_send_ump(nm2_transport_t* transport,
     if (packet_len < 0) {
         ESP_LOGE(TAG, "Failed to build UMP packet");
         return MIDI_ERR_INVALID_ARG;
+    }
+    
+    // 存入重传缓冲区 (如果支持重传)
+    if (transport->session && nm2_session_supports_retransmit(transport->session)) {
+        nm2_retransmit_buffer_t* retransmit_buf = nm2_session_get_retransmit_buffer(transport->session);
+        if (retransmit_buf) {
+            nm2_retransmit_buffer_add(retransmit_buf, sequence, ump_data, length);
+        }
     }
     
     struct sockaddr_in addr = {0};

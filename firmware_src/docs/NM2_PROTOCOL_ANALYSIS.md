@@ -5,22 +5,23 @@
 - **更新日期**: 2026-03-22
 - **参考规范**: M2-124-UM_v1-0-1_Network-MIDI-2-0-UDP.pdf
 - **参考实现**: D:\WorkSpace\MidiBridge\Test (C# 已验证功能正常)
+- **参考指南**: MIDI.org - Network MIDI 2.0 Implementation Guide: Using Sequence Numbers for Robustness and Recovery
 
 ---
 
 ## 一、实现状态总览
 
-### 📊 实现完成度: **约 85%** (更新后)
+### 📊 实现完成度: **约 90%** (更新后)
 
 | 类别 | 完成度 | 状态 |
 |------|--------|------|
 | UDP 包格式 | 100% | ✅ 已实现签名和命令包结构 |
 | 命令码定义 | 100% | ✅ 所有命令码已定义 |
 | 邀请流程 | 90% | ✅ INV/INV_ACCEPTED/INV_REJECTED 已实现 |
-| 保活机制 | 100% | ✅ PING/PING_REPLY 已实现 |
+| 保活机制 | 100% | ✅ PING/PING_REPLY 已实现，自动保活定时器已集成 |
 | 会话终止 | 100% | ✅ BYE/BYE_REPLY 已实现 |
 | UMP 数据传输 | 100% | ✅ 序列号处理正确 |
-| 重传机制 | 80% | ✅ 缓冲区已实现，处理逻辑待完善 |
+| 重传机制 | 95% | ✅ 缓冲区已实现，RETRANSMIT_REQUEST 处理已完成 |
 | 会话重置 | 100% | ✅ SESSION_RESET 已实现 |
 | 错误处理 | 100% | ✅ NAK 已实现 |
 | 认证机制 | 0% | ❌ 未实现 |
@@ -70,6 +71,90 @@ midi_error_t nm2_session_handle_reset(nm2_session_t* session, int socket, const 
 midi_error_t nm2_session_reset(nm2_session_t* session);
 ```
 
+### 2.5 序列号管理 (参考 MIDI.org 实现指南) ✅
+
+根据 MIDI.org 实现指南，实现了完整的序列号管理：
+
+```c
+// 会话结构中的序列号字段
+struct nm2_session {
+    uint16_t last_sent_seq;         ///< LastSentSeqNum - 最后发送的序列号
+    uint16_t last_received_seq;     ///< LastReceivedSeqNum - 最后接收的序列号
+    nm2_retransmit_buffer_t retransmit_buf;  ///< 重传缓冲区
+};
+
+// API 函数
+uint16_t nm2_session_get_last_sent_seq(const nm2_session_t* session);
+uint16_t nm2_session_get_last_received_seq(const nm2_session_t* session);
+void nm2_session_update_last_received_seq(nm2_session_t* session, uint16_t seq);
+uint16_t nm2_session_next_send_seq(nm2_session_t* session);
+```
+
+### 2.6 保活机制 ✅
+
+```c
+// 常量定义 (参考 MIDI.org 实现指南)
+#define NM2_KEEPALIVE_INTERVAL_MS   10000  // 10 秒
+#define NM2_KEEPALIVE_TIMEOUT_MS    30000  // 30 秒
+#define NM2_KEEPALIVE_MAX_RETRIES   3
+
+// API 函数
+uint32_t nm2_session_get_last_activity_ms(const nm2_session_t* session);
+bool nm2_session_need_keepalive(const nm2_session_t* session);
+midi_error_t nm2_session_send_keepalive(nm2_session_t* session, int socket);
+void nm2_session_update_activity(nm2_session_t* session);
+```
+
+### 2.7 RETRANSMIT_REQUEST 处理 ✅
+
+在 `nm2_transport.c` 中实现了重传请求处理：
+
+```c
+case NM2_CMD_RETRANSMIT_REQUEST: {
+    // 解析重传请求参数
+    uint16_t first_seq = ((uint16_t)cmd.specific1 << 8) | cmd.specific2;
+    uint16_t count = cmd.payload_len > 0 ? cmd.payload[0] : 1;
+    
+    // 从重传缓冲区获取数据包并重传
+    for (int i = 0; i < count; i++) {
+        uint16_t seq = (first_seq + i) & 0xFFFF;
+        int data_len = nm2_retransmit_buffer_get(retransmit_buf, seq, retransmit_data, sizeof(retransmit_data));
+        if (data_len > 0) {
+            nm2_transport_send_ump(transport, info.ip_address, info.port, seq, retransmit_data, data_len);
+        }
+    }
+}
+```
+
+### 2.8 会话配置 ✅
+
+```c
+typedef struct {
+    bool enable_retransmit;     ///< 启用重传支持
+    bool enable_fec;            ///< 启用前向纠错 (FEC)
+    uint16_t keepalive_interval;///< 保活间隔 (毫秒)
+} nm2_session_config_t;
+
+void nm2_session_set_config(nm2_session_t* session, const nm2_session_config_t* config);
+```
+
+### 2.9 传输层与会话层集成 ✅
+
+```c
+// 传输层支持会话上下文
+void nm2_transport_set_session(nm2_transport_t* transport, nm2_session_t* session);
+
+// 发送 UMP 时自动存入重传缓冲区
+midi_error_t nm2_transport_send_ump(...) {
+    // 存入重传缓冲区 (如果支持重传)
+    if (transport->session && nm2_session_supports_retransmit(transport->session)) {
+        nm2_retransmit_buffer_add(retransmit_buf, sequence, ump_data, length);
+    }
+    // 发送数据包
+    ...
+}
+```
+
 ---
 
 ## 三、协议概述
@@ -98,7 +183,7 @@ Network MIDI 2.0 (NM2) 是 MIDI 协会定义的基于 UDP 的 MIDI 2.0 网络传
 | PING | 0x20 | ✅ 已实现 |
 | PING_REPLY (PONG) | 0x21 | ✅ 已实现 |
 | **重传机制** |
-| RETRANSMIT_REQUEST | 0x80 | ⚠️ 结构已定义，处理逻辑待实现 |
+| RETRANSMIT_REQUEST | 0x80 | ✅ 已实现 (参考 MIDI.org 实现指南) |
 | RETRANSMIT_ERROR | 0x81 | ⚠️ 结构已定义，处理逻辑待实现 |
 | SESSION_RESET | 0x82 | ✅ 已实现 |
 | SESSION_RESET_REPLY | 0x83 | ✅ 已实现 |
