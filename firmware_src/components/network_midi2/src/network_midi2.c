@@ -1,5 +1,7 @@
 #include "network_midi2.h"
+#include "nm2_protocol.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
@@ -461,42 +463,11 @@ bool network_midi2_get_discovered_device(
 
 static void network_midi2_create_invitation_packet(network_midi2_context_t* ctx,
                                                    uint8_t* packet, int* length) {
-    int offset = 0;
-    
-    // Command byte: 0x01 (INV)
-    packet[offset++] = 0x01;
-    // Status: 0x00 (inquiry)
-    packet[offset++] = 0x00;
-    // Local SSRC (4 bytes, big-endian)
-    packet[offset++] = (ctx->local_ssrc >> 24) & 0xFF;
-    packet[offset++] = (ctx->local_ssrc >> 16) & 0xFF;
-    packet[offset++] = (ctx->local_ssrc >> 8) & 0xFF;
-    packet[offset++] = ctx->local_ssrc & 0xFF;
-    // Remote SSRC (0 for invitation, 4 bytes)
-    packet[offset++] = 0x00;
-    packet[offset++] = 0x00;
-    packet[offset++] = 0x00;
-    packet[offset++] = 0x00;
-    
-    // Device name length (2 bytes)
-    int name_len = strlen(ctx->device_name);
-    packet[offset++] = (name_len >> 8) & 0xFF;
-    packet[offset++] = name_len & 0xFF;
-    
-    // Device name
-    memcpy(&packet[offset], ctx->device_name, name_len);
-    offset += name_len;
-    
-    // Product ID length (2 bytes)
-    int product_len = strlen(ctx->product_id);
-    packet[offset++] = (product_len >> 8) & 0xFF;
-    packet[offset++] = product_len & 0xFF;
-    
-    // Product ID
-    memcpy(&packet[offset], ctx->product_id, product_len);
-    offset += product_len;
-    
-    *length = offset;
+    // 使用新协议模块构建 INV 包
+    *length = nm2_protocol_build_inv(packet, 256,
+                                      ctx->device_name,
+                                      ctx->product_id,
+                                      NM2_CAP_NONE);
 }
 
 bool network_midi2_session_initiate(
@@ -564,26 +535,23 @@ bool network_midi2_session_accept(network_midi2_context_t* ctx) {
         return false;
     }
     
-    uint8_t packet[12];
-    packet[0] = 0x01;  // INV command
-    packet[1] = 0x01;  // Status: accept
-    // Local SSRC (4 bytes, big-endian)
-    packet[2] = (ctx->local_ssrc >> 24) & 0xFF;
-    packet[3] = (ctx->local_ssrc >> 16) & 0xFF;
-    packet[4] = (ctx->local_ssrc >> 8) & 0xFF;
-    packet[5] = ctx->local_ssrc & 0xFF;
-    // Remote SSRC (4 bytes, big-endian)
-    packet[6] = (ctx->current_session.remote_ssrc >> 24) & 0xFF;
-    packet[7] = (ctx->current_session.remote_ssrc >> 16) & 0xFF;
-    packet[8] = (ctx->current_session.remote_ssrc >> 8) & 0xFF;
-    packet[9] = ctx->current_session.remote_ssrc & 0xFF;
+    // 使用新协议模块构建 INV_ACCEPTED 包
+    uint8_t packet[NM2_MAX_PACKET_SIZE];
+    int packet_len = nm2_protocol_build_inv_accepted(packet, sizeof(packet),
+                                                      ctx->device_name,
+                                                      ctx->product_id);
+    
+    if (packet_len < 0) {
+        xSemaphoreGive(ctx->session_mutex);
+        return false;
+    }
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    if (sendto(ctx->data_socket, packet, 4, 0,
+    if (sendto(ctx->data_socket, packet, packet_len, 0,
                (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         xSemaphoreGive(ctx->session_mutex);
         return false;
@@ -613,27 +581,21 @@ bool network_midi2_session_reject(network_midi2_context_t* ctx) {
         return false;
     }
     
-    uint8_t packet[10];
-    packet[0] = 0x01;  // INV command
-    packet[1] = 0x02;  // Status: reject
-    // Local SSRC (4 bytes, big-endian)
-    packet[2] = (ctx->local_ssrc >> 24) & 0xFF;
-    packet[3] = (ctx->local_ssrc >> 16) & 0xFF;
-    packet[4] = (ctx->local_ssrc >> 8) & 0xFF;
-    packet[5] = ctx->local_ssrc & 0xFF;
-    // Remote SSRC (4 bytes, big-endian)
-    packet[6] = (ctx->current_session.remote_ssrc >> 24) & 0xFF;
-    packet[7] = (ctx->current_session.remote_ssrc >> 16) & 0xFF;
-    packet[8] = (ctx->current_session.remote_ssrc >> 8) & 0xFF;
-    packet[9] = ctx->current_session.remote_ssrc & 0xFF;
+    // 使用新协议模块构建 BYE 包 (拒绝邀请)
+    uint8_t packet[NM2_MAX_PACKET_SIZE];
+    int packet_len = nm2_protocol_build_bye(packet, sizeof(packet),
+                                             NM2_BYE_INV_REJECTED_BY_USER,
+                                             "Session rejected");
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    sendto(ctx->data_socket, packet, 10, 0,
-           (struct sockaddr*)&addr, sizeof(addr));
+    if (packet_len > 0) {
+        sendto(ctx->data_socket, packet, packet_len, 0,
+               (struct sockaddr*)&addr, sizeof(addr));
+    }
     
     ctx->session_state = SESSION_STATE_IDLE;
     ctx->current_session.state = SESSION_STATE_IDLE;
@@ -659,19 +621,21 @@ bool network_midi2_session_terminate(network_midi2_context_t* ctx) {
     
     ctx->session_state = SESSION_STATE_CLOSING;
     
-    uint8_t packet[4];
-    packet[0] = 0x02;  // END command
-    packet[1] = 0x00;  // Status
-    packet[2] = ctx->local_ssrc;
-    packet[3] = ctx->current_session.remote_ssrc;
+    // 使用新协议模块构建 BYE 包
+    uint8_t packet[NM2_MAX_PACKET_SIZE];
+    int packet_len = nm2_protocol_build_bye(packet, sizeof(packet),
+                                             NM2_BYE_USER_TERMINATED,
+                                             "Session terminated");
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    sendto(ctx->data_socket, packet, 4, 0,
-           (struct sockaddr*)&addr, sizeof(addr));
+    if (packet_len > 0) {
+        sendto(ctx->data_socket, packet, packet_len, 0,
+               (struct sockaddr*)&addr, sizeof(addr));
+    }
     
     ctx->session_state = SESSION_STATE_IDLE;
     memset(&ctx->current_session, 0, sizeof(ctx->current_session));
@@ -706,18 +670,21 @@ bool network_midi2_send_ping(network_midi2_context_t* ctx) {
         return false;
     }
     
-    uint8_t packet[4];
-    packet[0] = 0x03;  // PING command
-    packet[1] = 0x00;  // Status
-    packet[2] = ctx->local_ssrc;
-    packet[3] = ctx->current_session.remote_ssrc;
+    // 使用新协议模块构建 PING 包
+    uint8_t packet[NM2_MAX_PACKET_SIZE];
+    uint32_t ping_id = esp_random();
+    int packet_len = nm2_protocol_build_ping(packet, sizeof(packet), ping_id);
+    
+    if (packet_len < 0) {
+        return false;
+    }
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    if (sendto(ctx->data_socket, packet, 4, 0,
+    if (sendto(ctx->data_socket, packet, packet_len, 0,
                (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         return false;
     }
@@ -755,23 +722,10 @@ static void network_midi2_create_ump_data_packet(network_midi2_context_t* ctx,
                                                  uint8_t* packet,
                                                  int* packet_len)
 {
-    int offset = 0;
-    
-    // Command: UMP Data (0x10)
-    packet[offset++] = 0x10;
-    
-    // Sequence number (2 bytes)
-    packet[offset++] = (ctx->send_sequence >> 8) & 0xFF;
-    packet[offset++] = ctx->send_sequence & 0xFF;
-    
-    // Reserved
-    packet[offset++] = 0x00;
-    
-    // UMP data
-    memcpy(&packet[offset], ump_data, ump_len);
-    offset += ump_len;
-    
-    *packet_len = offset;
+    // 使用新协议模块构建 UMP 数据包
+    *packet_len = nm2_protocol_build_ump_data(packet, 256,
+                                               ctx->send_sequence,
+                                               ump_data, ump_len);
     ctx->send_sequence++;
 }
 
@@ -894,25 +848,24 @@ static void network_midi2_process_received_packet(network_midi2_context_t* ctx,
                                                   const uint8_t* data,
                                                   int length)
 {
-    if (length < 4) return;
+    // 验证 UDP 签名
+    if (!nm2_protocol_validate_signature(data, length)) {
+        return;
+    }
     
-    uint8_t cmdbyte = data[0];
-    uint8_t cmd = cmdbyte & 0x0F;
-    uint8_t status = data[1];
-    uint8_t ssrc = data[2];
+    // 解析命令包
+    nm2_command_packet_t cmd;
+    int parsed = nm2_protocol_parse_packet(data, length, &cmd, 1);
     
-    // UMP Data
-    if (cmdbyte == 0x10) {
-        if (length < 4) return;
-        
-        if (xSemaphoreTake(ctx->session_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            ctx->current_session.remote_ssrc = ssrc;
-            xSemaphoreGive(ctx->session_mutex);
-        }
-        
-        uint16_t seq = ((uint16_t)data[1] << 8) | data[2];
-        uint8_t* ump_data = (uint8_t*)&data[4];
-        int ump_len = length - 4;
+    if (parsed < 1) {
+        return;
+    }
+    
+    // UMP Data (0xFF)
+    if (cmd.command == NM2_CMD_UMP_DATA) {
+        uint16_t seq = ((uint16_t)cmd.specific1 << 8) | cmd.specific2;
+        const uint8_t* ump_data = cmd.payload;
+        int ump_len = cmd.payload_len;
         
         network_midi2_logf(ctx, "[RX] UMP seq=%d, len=%d", seq, ump_len);
         
@@ -951,46 +904,69 @@ static void network_midi2_process_received_packet(network_midi2_context_t* ctx,
     }
     
     // Session Commands
-    switch (cmd) {
-        case 0x01:  // INV (Invitation)
+    switch (cmd.command) {
+        case NM2_CMD_INV:  // INV (Invitation)
             if (xSemaphoreTake(ctx->session_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                if (status == 0x00) {  // Inquiry
-                    ctx->current_session.remote_ssrc = ssrc;
+                // 解析邀请数据
+                nm2_invitation_t inv;
+                if (nm2_protocol_parse_inv(&cmd, &inv)) {
+                    ctx->current_session.remote_ssrc = esp_random();  // 生成随机 SSRC
                     ctx->session_state = SESSION_STATE_INV_PENDING;
-                    network_midi2_logf(ctx, "[Session] INV received from SSRC %02X", ssrc);
-                } else if (status == 0x01) {  // Accepted
-                    ctx->current_session.remote_ssrc = ssrc;
-                    ctx->session_state = SESSION_STATE_ACTIVE;
-                    ctx->send_sequence = 0;
-                    network_midi2_logf(ctx, "[Session] INV ACCEPTED! SSRC %02X <-> %02X",
-                                      ctx->local_ssrc, ssrc);
-                } else if (status == 0x02) {  // Rejected
-                    network_midi2_logf(ctx, "[Session] INV REJECTED by SSRC %02X", ssrc);
-                    ctx->session_state = SESSION_STATE_IDLE;
+                    if (inv.ump_endpoint_name) {
+                        strncpy(ctx->current_session.device_name, inv.ump_endpoint_name, 63);
+                    }
+                    network_midi2_logf(ctx, "[Session] INV received");
                 }
                 xSemaphoreGive(ctx->session_mutex);
             }
             break;
             
-        case 0x02:  // END (End Session)
+        case NM2_CMD_INV_ACCEPTED:  // INV_ACCEPTED
             if (xSemaphoreTake(ctx->session_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                network_midi2_logf(ctx, "[Session] END received from SSRC %02X", ssrc);
+                nm2_invitation_reply_t reply;
+                if (nm2_protocol_parse_inv_reply(&cmd, &reply)) {
+                    if (reply.ump_endpoint_name) {
+                        strncpy(ctx->current_session.device_name, reply.ump_endpoint_name, 63);
+                    }
+                }
+                ctx->session_state = SESSION_STATE_ACTIVE;
+                ctx->send_sequence = 0;
+                network_midi2_logf(ctx, "[Session] INV ACCEPTED!");
+                xSemaphoreGive(ctx->session_mutex);
+            }
+            break;
+            
+        case NM2_CMD_BYE:  // BYE (End Session)
+            if (xSemaphoreTake(ctx->session_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                network_midi2_log(ctx, "[Session] BYE received");
                 ctx->session_state = SESSION_STATE_IDLE;
                 memset(&ctx->current_session, 0, sizeof(ctx->current_session));
                 xSemaphoreGive(ctx->session_mutex);
             }
             break;
             
-        case 0x03:  // PING/PONG
-            if (status == 0x00) {  // PING
-                uint8_t pong[4] = {0x03, 0x01, ctx->local_ssrc, ssrc};
-                struct sockaddr_in addr = {0};
-                addr.sin_family = AF_INET;
-                addr.sin_addr.s_addr = ctx->current_session.ip_address;
-                addr.sin_port = htons(ctx->current_session.port);
-                sendto(ctx->data_socket, pong, 4, 0, (struct sockaddr*)&addr, sizeof(addr));
-                network_midi2_logf(ctx, "[Session] PING from %02X, sent PONG", ssrc);
+        case NM2_CMD_PING:  // PING
+            {
+                uint32_t ping_id;
+                if (nm2_protocol_parse_ping(&cmd, &ping_id)) {
+                    // 发送 PING_REPLY
+                    uint8_t reply[NM2_MAX_PACKET_SIZE];
+                    int reply_len = nm2_protocol_build_ping_reply(reply, sizeof(reply), ping_id);
+                    
+                    if (reply_len > 0) {
+                        struct sockaddr_in addr = {0};
+                        addr.sin_family = AF_INET;
+                        addr.sin_addr.s_addr = ctx->current_session.ip_address;
+                        addr.sin_port = htons(ctx->current_session.port);
+                        sendto(ctx->data_socket, reply, reply_len, 0, (struct sockaddr*)&addr, sizeof(addr));
+                        network_midi2_log(ctx, "[Session] PING received, sent PING_REPLY");
+                    }
+                }
             }
+            break;
+            
+        default:
+            network_midi2_logf(ctx, "[RX] Unknown command: 0x%02X", cmd.command);
             break;
     }
 }

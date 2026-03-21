@@ -5,6 +5,7 @@ idf_component_register(
         "src/nm2_session.c"
         "src/nm2_transport.c"
         "src/nm2_discovery.c"
+        "src/nm2_protocol.c"
     INCLUDE_DIRS 
         "include"
     REQUIRES 
@@ -13,4 +14,5 @@ idf_component_register(
         "esp_common"
         "common"
         "mdns"
+        "mbedtls"
 )

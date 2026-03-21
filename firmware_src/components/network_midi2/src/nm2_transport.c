@@ -4,12 +4,14 @@
  */
 
 #include "nm2_transport.h"
+#include "nm2_protocol.h"
 #include "midi_converter.h"
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
@@ -60,15 +62,26 @@ static void receive_task(void* arg) {
             continue;
         }
         
-        if (len < 4) continue;
+        // 验证 UDP 签名
+        if (!nm2_protocol_validate_signature(buffer, len)) {
+            ESP_LOGW(TAG, "Invalid packet signature");
+            continue;
+        }
         
-        uint8_t cmd = buffer[0];
+        // 解析命令包
+        nm2_command_packet_t cmd;
+        int parsed = nm2_protocol_parse_packet(buffer, len, &cmd, 1);
         
-        // UMP 数据 (cmd = 0x10)
-        if (cmd == 0x10 && len > 4) {
-            uint16_t seq = ((uint16_t)buffer[1] << 8) | buffer[2];
-            uint8_t* ump = &buffer[4];
-            int ump_len = len - 4;
+        if (parsed < 1) {
+            ESP_LOGW(TAG, "Failed to parse packet");
+            continue;
+        }
+        
+        // UMP 数据 (cmd = 0xFF)
+        if (cmd.command == NM2_CMD_UMP_DATA && cmd.payload_len > 0) {
+            uint16_t seq = ((uint16_t)cmd.specific1 << 8) | cmd.specific2;
+            const uint8_t* ump = cmd.payload;
+            int ump_len = cmd.payload_len;
             
             ESP_LOGD(TAG, "RX UMP: seq=%d, len=%d", seq, ump_len);
             
@@ -204,28 +217,22 @@ midi_error_t nm2_transport_send_ump(nm2_transport_t* transport,
     if (!transport || !ump_data) return MIDI_ERR_INVALID_ARG;
     if (transport->socket < 0) return MIDI_ERR_NET_NOT_CONNECTED;
     
-    uint8_t packet[1500];
-    int offset = 0;
+    // 使用新协议模块构建 UMP 数据包
+    uint8_t packet[NM2_MAX_PACKET_SIZE];
+    int packet_len = nm2_protocol_build_ump_data(packet, sizeof(packet),
+                                                   sequence, ump_data, length);
     
-    // Header
-    packet[offset++] = 0x10;  // UMP data
-    packet[offset++] = (sequence >> 8) & 0xFF;
-    packet[offset++] = sequence & 0xFF;
-    packet[offset++] = 0x00;  // Reserved
-    
-    // UMP data
-    if (length > sizeof(packet) - 4) {
-        length = sizeof(packet) - 4;
+    if (packet_len < 0) {
+        ESP_LOGE(TAG, "Failed to build UMP packet");
+        return MIDI_ERR_INVALID_ARG;
     }
-    memcpy(&packet[offset], ump_data, length);
-    offset += length;
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ip;
     addr.sin_port = htons(port);
     
-    int sent = sendto(transport->socket, packet, offset, 0,
+    int sent = sendto(transport->socket, packet, packet_len, 0,
                        (struct sockaddr*)&addr, sizeof(addr));
     if (sent < 0) {
         ESP_LOGE(TAG, "Send failed: %d", errno);
@@ -252,14 +259,22 @@ midi_error_t nm2_transport_send_ping(nm2_transport_t* transport,
     if (!transport) return MIDI_ERR_INVALID_ARG;
     if (transport->socket < 0) return MIDI_ERR_NET_NOT_CONNECTED;
     
-    uint8_t packet[4] = { 0x00, 0x00, 0x00, 0x00 };
+    // 使用新协议模块构建 PING 包
+    uint8_t packet[NM2_MAX_PACKET_SIZE];
+    uint32_t ping_id = esp_random();  // 生成随机 ping ID
+    int packet_len = nm2_protocol_build_ping(packet, sizeof(packet), ping_id);
+    
+    if (packet_len < 0) {
+        ESP_LOGE(TAG, "Failed to build PING packet");
+        return MIDI_ERR_INVALID_ARG;
+    }
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ip;
     addr.sin_port = htons(port);
     
-    sendto(transport->socket, packet, sizeof(packet), 0,
+    sendto(transport->socket, packet, packet_len, 0,
            (struct sockaddr*)&addr, sizeof(addr));
     
     return MIDI_OK;
