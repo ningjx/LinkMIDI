@@ -80,7 +80,7 @@ typedef struct {
 typedef struct {
     const char* device_name;              ///< Device name for discovery
     const char* product_id;               ///< Product identifier
-    uint16_t listen_port;                 ///< UDP port to listen on (default: 5507)
+    uint16_t listen_port;                 ///< UDP port to listen on (default: 5506)
     network_midi2_device_mode_t mode;     ///< Device role (client/server/peer)
     bool enable_discovery;                ///< Enable mDNS discovery announcement
     
@@ -224,6 +224,13 @@ network_midi2_session_state_t network_midi2_get_session_state(
  * @return true if session is active
  */
 bool network_midi2_is_session_active(network_midi2_context_t* ctx);
+
+/**
+ * @brief Get remote device name from current session
+ * @param ctx Context handle
+ * @return Remote device name string, or NULL if no session
+ */
+const char* network_midi2_get_remote_device_name(network_midi2_context_t* ctx);
 
 /**
  * @brief Send a ping command to keep session alive

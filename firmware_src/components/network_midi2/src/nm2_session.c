@@ -598,3 +598,101 @@ void nm2_session_update_activity(nm2_session_t* session) {
         xSemaphoreGive(session->mutex);
     }
 }
+
+/* ============================================================================ * 超时检查 API
+ * ============================================================================ */
+
+/**
+ * @brief 检查邀请是否超时
+ * 
+ * 邀请发送后30秒内未收到响应视为超时
+ */
+bool nm2_session_is_invitation_timeout(const nm2_session_t* session) {
+    if (!session || session->info.state != NM2_SESSION_INV_PENDING) return false;
+    
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t elapsed = now_ms - session->last_activity_ms;
+    
+    // 邀请超时: 30秒
+    return elapsed >= NM2_KEEPALIVE_TIMEOUT_MS;
+}
+
+/**
+ * @brief 检查保活是否超时
+ * 
+ * 连续3次PING未收到PONG响应视为超时
+ */
+bool nm2_session_is_keepalive_timeout(const nm2_session_t* session) {
+    if (!session || session->info.state != NM2_SESSION_ACTIVE) return false;
+    
+    // 保活超时: 3次重试失败
+    return session->keepalive_retries >= NM2_KEEPALIVE_MAX_RETRIES;
+}
+
+/**
+ * @brief 检查会话是否超时 (无活动)
+ * 
+ * 30秒内无任何数据交换视为超时
+ */
+bool nm2_session_is_session_timeout(const nm2_session_t* session) {
+    if (!session || session->info.state != NM2_SESSION_ACTIVE) return false;
+    
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    uint32_t elapsed = now_ms - session->last_activity_ms;
+    
+    // 会话超时: 30秒无活动
+    return elapsed >= NM2_KEEPALIVE_TIMEOUT_MS;
+}
+
+/**
+ * @brief 处理超时 - 终止会话
+ */
+midi_error_t nm2_session_handle_timeout(nm2_session_t* session, int socket) {
+    if (!session) return MIDI_ERR_INVALID_ARG;
+    
+    nm2_bye_reason_t reason;
+    
+    if (session->info.state == NM2_SESSION_INV_PENDING) {
+        reason = NM2_BYE_TIMEOUT;
+        ESP_LOGW(TAG, "Invitation timeout");
+    } else if (session->keepalive_retries >= NM2_KEEPALIVE_MAX_RETRIES) {
+        reason = NM2_BYE_TIMEOUT;
+        ESP_LOGW(TAG, "Keepalive timeout (retries=%d)", session->keepalive_retries);
+    } else {
+        reason = NM2_BYE_TIMEOUT;
+        ESP_LOGW(TAG, "Session timeout (no activity)");
+    }
+    
+    // 发送BYE
+    if (socket >= 0 && session->info.ip_address != 0) {
+        uint8_t packet[NM2_MAX_PACKET_SIZE];
+        int packet_len = nm2_protocol_build_bye(packet, sizeof(packet), reason, "Timeout");
+        
+        if (packet_len > 0) {
+            struct sockaddr_in addr = {0};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = session->info.ip_address;
+            addr.sin_port = htons(session->info.port);
+            sendto(socket, packet, packet_len, 0, (struct sockaddr*)&addr, sizeof(addr));
+        }
+    }
+    
+    // 重置状态
+    if (xSemaphoreTake(session->mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        session->info.state = NM2_SESSION_IDLE;
+        session->keepalive_retries = 0;
+        xSemaphoreGive(session->mutex);
+    }
+    
+    notify_event(session);
+    return MIDI_OK;
+}
+
+/**
+ * @brief 清理重传缓冲区中的过期条目
+ */
+void nm2_session_clean_retransmit_buffer(nm2_session_t* session) {
+    if (!session) return;
+    
+    nm2_retransmit_buffer_clean(&session->retransmit_buf, NM2_RETRANSMIT_MAX_AGE_MS);
+}

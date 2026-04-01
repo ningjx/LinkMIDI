@@ -22,8 +22,14 @@ static const char* TAG = "NM2";
 #define MDNS_MULTICAST_PORT 5353
 #define MAX_DISCOVERED_DEVICES 16
 #define RECEIVE_TASK_PRIORITY 5
-#define RECEIVE_TASK_STACK_SIZE 4096
+#define RECEIVE_TASK_STACK_SIZE 8192
 #define DISCOVERY_TASK_STACK_SIZE 4096
+
+/* UDP Signature "MIDI" = 0x4D494449 */
+#define UDP_SIGNATURE_0 0x4D  // 'M'
+#define UDP_SIGNATURE_1 0x49  // 'I'
+#define UDP_SIGNATURE_2 0x44  // 'D'
+#define UDP_SIGNATURE_3 0x49  // 'I'
 
 /* ============================================================================
  * Device Structure
@@ -96,6 +102,47 @@ static void network_midi2_logf(network_midi2_context_t* ctx, const char* fmt, ..
 }
 
 /* ============================================================================
+ * Helper Functions
+ * ============================================================================ */
+
+/**
+ * Add UDP signature to packet and send
+ * All NM2 packets must start with "MIDI" signature (0x4D494449)
+ */
+static int send_packet_with_signature(network_midi2_context_t* ctx,
+                                       const uint8_t* cmd_packet, int cmd_len,
+                                       struct sockaddr_in* dest_addr) {
+    if (!ctx || !cmd_packet || cmd_len <= 0 || !dest_addr) {
+        return -1;
+    }
+    
+    // Build packet with signature: [MIDI][command packet]
+    uint8_t packet[NM2_MAX_PACKET_SIZE + 4];
+    int total_len = cmd_len + 4;
+    
+    if (total_len > sizeof(packet)) {
+        return -1;
+    }
+    
+    // Add UDP signature
+    packet[0] = UDP_SIGNATURE_0;
+    packet[1] = UDP_SIGNATURE_1;
+    packet[2] = UDP_SIGNATURE_2;
+    packet[3] = UDP_SIGNATURE_3;
+    
+    // Copy command packet
+    memcpy(&packet[4], cmd_packet, cmd_len);
+    
+    // Send
+    if (sendto(ctx->data_socket, packet, total_len, 0,
+               (struct sockaddr*)dest_addr, sizeof(*dest_addr)) < 0) {
+        return -1;
+    }
+    
+    return total_len;
+}
+
+/* ============================================================================
  * Initialization Functions
  * ============================================================================ */
 
@@ -118,9 +165,13 @@ network_midi2_context_t* network_midi2_init_with_config(
     const network_midi2_config_t* config)
 {
     if (!config || !config->device_name || !config->product_id) {
-        ESP_LOGE(TAG, "Invalid configuration");
+        ESP_LOGE(TAG, "Invalid configuration: config=%p, device_name=%p, product_id=%p",
+                 config, config ? config->device_name : NULL, config ? config->product_id : NULL);
         return NULL;
     }
+    
+    ESP_LOGI(TAG, "Initializing with device_name='%s', product_id='%s'",
+             config->device_name, config->product_id);
     
     network_midi2_context_t* ctx = calloc(1, sizeof(network_midi2_context_t));
     if (!ctx) {
@@ -131,7 +182,10 @@ network_midi2_context_t* network_midi2_init_with_config(
     // Copy configuration
     strncpy(ctx->device_name, config->device_name, sizeof(ctx->device_name) - 1);
     strncpy(ctx->product_id, config->product_id, sizeof(ctx->product_id) - 1);
-    ctx->listen_port = config->listen_port ?: 5507;
+    
+    ESP_LOGI(TAG, "Context initialized: ctx->device_name='%s', ctx->product_id='%s'",
+             ctx->device_name, ctx->product_id);
+    ctx->listen_port = config->listen_port ?: 5506;
     ctx->mode = config->mode;
     ctx->enable_discovery = config->enable_discovery;
     
@@ -488,17 +542,16 @@ bool network_midi2_session_initiate(
         return false;
     }
     
-    uint8_t packet[256];
-    int length = 0;
-    network_midi2_create_invitation_packet(ctx, packet, &length);
+    uint8_t cmd_packet[256];
+    int cmd_len = 0;
+    network_midi2_create_invitation_packet(ctx, cmd_packet, &cmd_len);
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ip_address;
     addr.sin_port = htons(port);
     
-    if (sendto(ctx->data_socket, packet, length, 0,
-               (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (send_packet_with_signature(ctx, cmd_packet, cmd_len, &addr) < 0) {
         network_midi2_logf(ctx, "[Session] Send invitation failed: %d", errno);
         xSemaphoreGive(ctx->session_mutex);
         return false;
@@ -536,12 +589,12 @@ bool network_midi2_session_accept(network_midi2_context_t* ctx) {
     }
     
     // 使用新协议模块构建 INV_ACCEPTED 包
-    uint8_t packet[NM2_MAX_PACKET_SIZE];
-    int packet_len = nm2_protocol_build_inv_accepted(packet, sizeof(packet),
+    uint8_t cmd_packet[NM2_MAX_PACKET_SIZE];
+    int cmd_len = nm2_protocol_build_inv_accepted(cmd_packet, sizeof(cmd_packet),
                                                       ctx->device_name,
                                                       ctx->product_id);
     
-    if (packet_len < 0) {
+    if (cmd_len < 0) {
         xSemaphoreGive(ctx->session_mutex);
         return false;
     }
@@ -551,8 +604,7 @@ bool network_midi2_session_accept(network_midi2_context_t* ctx) {
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    if (sendto(ctx->data_socket, packet, packet_len, 0,
-               (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (send_packet_with_signature(ctx, cmd_packet, cmd_len, &addr) < 0) {
         xSemaphoreGive(ctx->session_mutex);
         return false;
     }
@@ -582,8 +634,8 @@ bool network_midi2_session_reject(network_midi2_context_t* ctx) {
     }
     
     // 使用新协议模块构建 BYE 包 (拒绝邀请)
-    uint8_t packet[NM2_MAX_PACKET_SIZE];
-    int packet_len = nm2_protocol_build_bye(packet, sizeof(packet),
+    uint8_t cmd_packet[NM2_MAX_PACKET_SIZE];
+    int cmd_len = nm2_protocol_build_bye(cmd_packet, sizeof(cmd_packet),
                                              NM2_BYE_INV_REJECTED_BY_USER,
                                              "Session rejected");
     
@@ -592,9 +644,8 @@ bool network_midi2_session_reject(network_midi2_context_t* ctx) {
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    if (packet_len > 0) {
-        sendto(ctx->data_socket, packet, packet_len, 0,
-               (struct sockaddr*)&addr, sizeof(addr));
+    if (cmd_len > 0) {
+        send_packet_with_signature(ctx, cmd_packet, cmd_len, &addr);
     }
     
     ctx->session_state = SESSION_STATE_IDLE;
@@ -622,8 +673,8 @@ bool network_midi2_session_terminate(network_midi2_context_t* ctx) {
     ctx->session_state = SESSION_STATE_CLOSING;
     
     // 使用新协议模块构建 BYE 包
-    uint8_t packet[NM2_MAX_PACKET_SIZE];
-    int packet_len = nm2_protocol_build_bye(packet, sizeof(packet),
+    uint8_t cmd_packet[NM2_MAX_PACKET_SIZE];
+    int cmd_len = nm2_protocol_build_bye(cmd_packet, sizeof(cmd_packet),
                                              NM2_BYE_USER_TERMINATED,
                                              "Session terminated");
     
@@ -632,9 +683,8 @@ bool network_midi2_session_terminate(network_midi2_context_t* ctx) {
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    if (packet_len > 0) {
-        sendto(ctx->data_socket, packet, packet_len, 0,
-               (struct sockaddr*)&addr, sizeof(addr));
+    if (cmd_len > 0) {
+        send_packet_with_signature(ctx, cmd_packet, cmd_len, &addr);
     }
     
     ctx->session_state = SESSION_STATE_IDLE;
@@ -665,17 +715,32 @@ bool network_midi2_is_session_active(network_midi2_context_t* ctx) {
     return result;
 }
 
+const char* network_midi2_get_remote_device_name(network_midi2_context_t* ctx) {
+    if (!ctx) return NULL;
+    
+    if (xSemaphoreTake(ctx->session_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (ctx->session_state == SESSION_STATE_ACTIVE && 
+            ctx->current_session.device_name[0] != '\0') {
+            xSemaphoreGive(ctx->session_mutex);
+            return ctx->current_session.device_name;
+        }
+        xSemaphoreGive(ctx->session_mutex);
+    }
+    
+    return NULL;
+}
+
 bool network_midi2_send_ping(network_midi2_context_t* ctx) {
     if (!ctx || ctx->session_state != SESSION_STATE_ACTIVE) {
         return false;
     }
     
     // 使用新协议模块构建 PING 包
-    uint8_t packet[NM2_MAX_PACKET_SIZE];
+    uint8_t cmd_packet[NM2_MAX_PACKET_SIZE];
     uint32_t ping_id = esp_random();
-    int packet_len = nm2_protocol_build_ping(packet, sizeof(packet), ping_id);
+    int cmd_len = nm2_protocol_build_ping(cmd_packet, sizeof(cmd_packet), ping_id);
     
-    if (packet_len < 0) {
+    if (cmd_len < 0) {
         return false;
     }
     
@@ -684,8 +749,7 @@ bool network_midi2_send_ping(network_midi2_context_t* ctx) {
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    if (sendto(ctx->data_socket, packet, packet_len, 0,
-               (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (send_packet_with_signature(ctx, cmd_packet, cmd_len, &addr) < 0) {
         return false;
     }
     
@@ -765,17 +829,16 @@ bool network_midi2_send_ump(
         return false;
     }
     
-    uint8_t packet[256];
-    int packet_len = 0;
-    network_midi2_create_ump_data_packet(ctx, ump_data, length, packet, &packet_len);
+    uint8_t cmd_packet[256];
+    int cmd_len = 0;
+    network_midi2_create_ump_data_packet(ctx, ump_data, length, cmd_packet, &cmd_len);
     
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = ctx->current_session.ip_address;
     addr.sin_port = htons(ctx->current_session.port);
     
-    if (sendto(ctx->data_socket, packet, packet_len, 0,
-               (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (send_packet_with_signature(ctx, cmd_packet, cmd_len, &addr) < 0) {
         network_midi2_logf(ctx, "[Send] UMP send failed: %d", errno);
         return false;
     }
@@ -846,7 +909,8 @@ bool network_midi2_send_pitch_bend(
 
 static void network_midi2_process_received_packet(network_midi2_context_t* ctx,
                                                   const uint8_t* data,
-                                                  int length)
+                                                  int length,
+                                                  struct sockaddr_in* src_addr)
 {
     // 验证 UDP 签名
     if (!nm2_protocol_validate_signature(data, length)) {
@@ -868,6 +932,11 @@ static void network_midi2_process_received_packet(network_midi2_context_t* ctx,
         int ump_len = cmd.payload_len;
         
         network_midi2_logf(ctx, "[RX] UMP seq=%d, len=%d", seq, ump_len);
+        
+        // Skip if no payload or invalid data
+        if (!ump_data || ump_len < 4) {
+            return;
+        }
         
         // Split UMP packets and invoke callbacks
         int offset = 0;
@@ -910,12 +979,34 @@ static void network_midi2_process_received_packet(network_midi2_context_t* ctx,
                 // 解析邀请数据
                 nm2_invitation_t inv;
                 if (nm2_protocol_parse_inv(&cmd, &inv)) {
+                    // 保存发送者地址
+                    if (src_addr) {
+                        ctx->current_session.ip_address = src_addr->sin_addr.s_addr;
+                        ctx->current_session.port = ntohs(src_addr->sin_port);
+                    }
                     ctx->current_session.remote_ssrc = esp_random();  // 生成随机 SSRC
                     ctx->session_state = SESSION_STATE_INV_PENDING;
                     if (inv.ump_endpoint_name) {
                         strncpy(ctx->current_session.device_name, inv.ump_endpoint_name, 63);
                     }
-                    network_midi2_logf(ctx, "[Session] INV received");
+                    network_midi2_logf(ctx, "[Session] INV received from %s:%d", 
+                                      inet_ntoa(src_addr->sin_addr), ntohs(src_addr->sin_port));
+                    
+                    // 发送 INV_ACCEPTED 响应
+                    ESP_LOGI(TAG, "[Session] Building INV_ACCEPTED: device_name='%s', product_id='%s'",
+                             ctx->device_name, ctx->product_id);
+                    uint8_t cmd_reply[256];
+                    int cmd_len = nm2_protocol_build_inv_accepted(cmd_reply, sizeof(cmd_reply),
+                                                                     ctx->device_name, ctx->product_id);
+                    ESP_LOGI(TAG, "[Session] INV_ACCEPTED cmd_len=%d", cmd_len);
+                    if (cmd_len > 0 && src_addr) {
+                        send_packet_with_signature(ctx, cmd_reply, cmd_len, src_addr);
+                        network_midi2_logf(ctx, "[Session] Sent INV_ACCEPTED to %s:%d",
+                                          inet_ntoa(src_addr->sin_addr), ntohs(src_addr->sin_port));
+                        
+                        // 会话激活
+                        ctx->session_state = SESSION_STATE_ACTIVE;
+                    }
                 }
                 xSemaphoreGive(ctx->session_mutex);
             }
@@ -950,15 +1041,15 @@ static void network_midi2_process_received_packet(network_midi2_context_t* ctx,
                 uint32_t ping_id;
                 if (nm2_protocol_parse_ping(&cmd, &ping_id)) {
                     // 发送 PING_REPLY
-                    uint8_t reply[NM2_MAX_PACKET_SIZE];
-                    int reply_len = nm2_protocol_build_ping_reply(reply, sizeof(reply), ping_id);
+                    uint8_t cmd_reply[NM2_MAX_PACKET_SIZE];
+                    int cmd_len = nm2_protocol_build_ping_reply(cmd_reply, sizeof(cmd_reply), ping_id);
                     
-                    if (reply_len > 0) {
+                    if (cmd_len > 0) {
                         struct sockaddr_in addr = {0};
                         addr.sin_family = AF_INET;
                         addr.sin_addr.s_addr = ctx->current_session.ip_address;
                         addr.sin_port = htons(ctx->current_session.port);
-                        sendto(ctx->data_socket, reply, reply_len, 0, (struct sockaddr*)&addr, sizeof(addr));
+                        send_packet_with_signature(ctx, cmd_reply, cmd_len, &addr);
                         network_midi2_log(ctx, "[Session] PING received, sent PING_REPLY");
                     }
                 }
@@ -983,7 +1074,7 @@ static void network_midi2_receive_task(void* arg) {
                         (struct sockaddr*)&src_addr, &src_addr_len);
         
         if (n > 0) {
-            network_midi2_process_received_packet(ctx, buffer, n);
+            network_midi2_process_received_packet(ctx, buffer, n, &src_addr);
         } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
             if (ctx->is_running) {
                 network_midi2_logf(ctx, "[RX] Socket error: %d", errno);

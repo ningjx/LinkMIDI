@@ -6,12 +6,16 @@
 #include "web_config_server.h"
 #include "config_manager.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_netif.h"
 #include "lwip/inet.h"
 #include "cJSON.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include <string.h>
 
 static const char* TAG = "WEB_CONFIG";
@@ -61,7 +65,8 @@ static const char* html_index =
 "<div class='section'>"
 "<h2>WiFi 配置</h2>"
 "<label for='ssid'>网络名称 (SSID):</label>"
-"<select id='ssid' onchange='updateSSID()'><option value=''>扫描中...</option></select>"
+"<select id='ssid' onchange='updateSSID()'><option value=''>请先扫描...</option></select>"
+"<button onclick='scanWiFi()' style='margin-bottom:10px;'>🔍 扫描WiFi</button>"
 "<label for='password'>密码:</label>"
 "<input type='password' id='password' placeholder='WiFi密码'>"
 "<button onclick='connectWiFi()'>连接 WiFi</button>"
@@ -72,7 +77,7 @@ static const char* html_index =
 "<label for='device_name'>设备名称:</label>"
 "<input type='text' id='device_name' placeholder='LinkMIDI-Device'>"
 "<label for='listen_port'>监听端口:</label>"
-"<input type='number' id='listen_port' value='5507' min='1024' max='65535'>"
+"<input type='number' id='listen_port' value='5506' min='1024' max='65535'>"
 "<button onclick='saveConfig()'>保存配置</button>"
 "</div>"
 
@@ -149,7 +154,7 @@ static const char* html_index =
 ".then(r => r.json())"
 ".then(data => {"
 "document.getElementById('device_name').value = data.device_name || '';"
-"document.getElementById('listen_port').value = data.listen_port || 5507;"
+"document.getElementById('listen_port').value = data.listen_port || 5506;"
 "})"
 ".catch(err => console.error('加载配置失败:', err));"
 "}"
@@ -242,12 +247,49 @@ static esp_err_t http_get_index(httpd_req_t *req) {
 }
 
 static esp_err_t http_get_wifi_scan(httpd_req_t *req) {
-    // 扫描WiFi
-    wifi_scan_config_t scan_config = {0};
-    esp_wifi_scan_start(&scan_config, true);
+    ESP_LOGI(TAG, "WiFi scan requested");
+    
+    // APSTA模式下的WiFi扫描配置
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,  // 扫描所有信道
+        .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time = {
+            .active = {
+                .min = 100,  // 最小扫描时间100ms
+                .max = 300,  // 最大扫描时间300ms
+            },
+        },
+    };
+    
+    // 使用阻塞扫描，但时间较短
+    esp_err_t err = esp_wifi_scan_start(&scan_config, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Scan failed: %s", esp_err_to_name(err));
+        cJSON *root = cJSON_CreateArray();
+        char *json_str = cJSON_Print(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, json_str, strlen(json_str));
+        free(json_str);
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
     
     uint16_t ap_count = 0;
     esp_wifi_scan_get_ap_num(&ap_count);
+    ESP_LOGI(TAG, "Found %d APs", ap_count);
+    
+    if (ap_count == 0) {
+        cJSON *root = cJSON_CreateArray();
+        char *json_str = cJSON_Print(root);
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, json_str, strlen(json_str));
+        free(json_str);
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
     
     wifi_ap_record_t *ap_list = malloc(sizeof(wifi_ap_record_t) * ap_count);
     if (!ap_list) {
@@ -264,6 +306,7 @@ static esp_err_t http_get_wifi_scan(httpd_req_t *req) {
         cJSON_AddStringToObject(ap, "ssid", (char*)ap_list[i].ssid);
         cJSON_AddNumberToObject(ap, "rssi", ap_list[i].rssi);
         cJSON_AddItemToArray(root, ap);
+        ESP_LOGI(TAG, "  AP[%d]: %s (rssi=%d)", i, ap_list[i].ssid, ap_list[i].rssi);
     }
     
     char *json_str = cJSON_Print(root);
@@ -274,10 +317,13 @@ static esp_err_t http_get_wifi_scan(httpd_req_t *req) {
     cJSON_Delete(root);
     free(ap_list);
     
+    ESP_LOGI(TAG, "WiFi scan completed, sent %d APs", ap_count);
     return ESP_OK;
 }
 
 static esp_err_t http_post_wifi_connect(httpd_req_t *req) {
+    ESP_LOGI(TAG, "WiFi connect request received");
+    
     char buf[512];
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0) {
@@ -285,10 +331,12 @@ static esp_err_t http_post_wifi_connect(httpd_req_t *req) {
         return ESP_FAIL;
     }
     buf[ret] = '\0';
+    ESP_LOGI(TAG, "Request data: %s", buf);
     
     // 解析JSON
     cJSON *root = cJSON_Parse(buf);
     if (!root) {
+        ESP_LOGE(TAG, "Invalid JSON");
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
         return ESP_FAIL;
     }
@@ -297,36 +345,117 @@ static esp_err_t http_post_wifi_connect(httpd_req_t *req) {
     cJSON *pass_json = cJSON_GetObjectItem(root, "password");
     
     if (!ssid_json || !cJSON_IsString(ssid_json)) {
+        ESP_LOGE(TAG, "Missing SSID");
         cJSON_Delete(root);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing SSID");
         return ESP_FAIL;
     }
     
-    // 更新WiFi配置
-    wifi_config_data_t wifi_config = {0};
-    strncpy(wifi_config.ssid, ssid_json->valuestring, sizeof(wifi_config.ssid) - 1);
-    if (pass_json && cJSON_IsString(pass_json)) {
-        strncpy(wifi_config.password, pass_json->valuestring, sizeof(wifi_config.password) - 1);
-    }
-    wifi_config.auto_connect = true;
+    const char* ssid = ssid_json->valuestring;
+    const char* password = (pass_json && cJSON_IsString(pass_json)) ? pass_json->valuestring : "";
     
-    midi_error_t err = config_manager_update_wifi(&wifi_config);
+    ESP_LOGI(TAG, "Connecting to WiFi: SSID=%s, Password=%s", ssid, password);
+    
+    // 保存WiFi凭据到NVS
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("wifi_config", NVS_READWRITE, &handle);
     
     cJSON *resp = cJSON_CreateObject();
-    if (err == MIDI_OK) {
-        cJSON_AddBoolToObject(resp, "success", true);
-        cJSON_AddStringToObject(resp, "message", "WiFi配置已保存，正在连接...");
+    if (err == ESP_OK) {
+        nvs_set_str(handle, "ssid", ssid);
+        nvs_set_str(handle, "password", password);
+        nvs_commit(handle);
+        nvs_close(handle);
+        ESP_LOGI(TAG, "WiFi credentials saved to NVS");
         
-        // 触发WiFi连接
-        esp_wifi_disconnect();
+        // 同时更新config_manager
+        wifi_config_data_t wifi_config = {0};
+        strncpy(wifi_config.ssid, ssid, sizeof(wifi_config.ssid) - 1);
+        strncpy(wifi_config.password, password, sizeof(wifi_config.password) - 1);
+        wifi_config.auto_connect = true;
+        config_manager_update_wifi(&wifi_config);
+        ESP_LOGI(TAG, "WiFi config updated in config_manager");
+        
+        // 立即尝试连接WiFi（从APSTA切换到STA模式）
+        ESP_LOGI(TAG, "Attempting to connect to WiFi...");
+        
+        // 停止当前WiFi
+        esp_wifi_stop();
+        
+        // 配置STA模式
         wifi_config_t sta_config = {0};
-        strncpy((char*)sta_config.sta.ssid, wifi_config.ssid, sizeof(sta_config.sta.ssid) - 1);
-        strncpy((char*)sta_config.sta.password, wifi_config.password, sizeof(sta_config.sta.password) - 1);
+        strncpy((char*)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid) - 1);
+        strncpy((char*)sta_config.sta.password, password, sizeof(sta_config.sta.password) - 1);
+        sta_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+        sta_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        
+        // 切换到STA模式并连接
+        esp_wifi_set_mode(WIFI_MODE_STA);
         esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+        esp_wifi_start();
         esp_wifi_connect();
+        
+        ESP_LOGI(TAG, "WiFi connection initiated, waiting for result...");
+        
+        // 等待连接结果（最多10秒）
+        int wait_count = 0;
+        bool connected = false;
+        char ip_str[16] = "unknown";
+        
+        while (wait_count < 100) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            
+            // 检查是否已连接
+            wifi_ap_record_t ap_info;
+            if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+                connected = true;
+                ESP_LOGI(TAG, "WiFi connected successfully!");
+                
+                // 获取IP地址
+                esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+                if (netif) {
+                    esp_netif_ip_info_t ip_info;
+                    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
+                        snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&ip_info.ip));
+                        ESP_LOGI(TAG, "Got IP: %s", ip_str);
+                    }
+                }
+                break;
+            }
+            wait_count++;
+        }
+        
+        if (connected) {
+            cJSON_AddBoolToObject(resp, "success", true);
+            cJSON_AddStringToObject(resp, "message", "WiFi连接成功！");
+            cJSON_AddStringToObject(resp, "ip", ip_str);
+            ESP_LOGI(TAG, "WiFi connect success, IP=%s", ip_str);
+        } else {
+            cJSON_AddBoolToObject(resp, "success", false);
+            cJSON_AddStringToObject(resp, "message", "WiFi连接失败，请检查密码");
+            ESP_LOGW(TAG, "WiFi connect failed after 10s timeout");
+            
+            // 连接失败，恢复APSTA模式
+            esp_wifi_stop();
+            esp_wifi_set_mode(WIFI_MODE_APSTA);
+            wifi_config_t ap_config = {
+                .ap = {
+                    .ssid = "LinkMidi",
+                    .ssid_len = strlen("LinkMidi"),
+                    .channel = 1,
+                    .password = "linkmidi",
+                    .max_connection = 4,
+                    .authmode = WIFI_AUTH_WPA2_PSK,
+                },
+            };
+            esp_wifi_set_config(WIFI_IF_AP, &ap_config);
+            esp_wifi_start();
+            ESP_LOGI(TAG, "Restored APSTA mode for provisioning");
+        }
     } else {
         cJSON_AddBoolToObject(resp, "success", false);
         cJSON_AddStringToObject(resp, "message", "保存配置失败");
+        ESP_LOGE(TAG, "Failed to open NVS: %s", esp_err_to_name(err));
     }
     
     char *json_str = cJSON_Print(resp);

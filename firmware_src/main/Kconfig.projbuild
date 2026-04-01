@@ -36,7 +36,7 @@ menu "Network MIDI 2.0 Configuration"
 
     config MIDI_DEVICE_NAME
         string "MIDI 2.0 Device Name"
-        default "ESP32-MIDI2"
+        default "Link MIDI"
         help
             The name of this device as advertised via mDNS.
 
@@ -48,21 +48,21 @@ menu "Network MIDI 2.0 Configuration"
 
     config MIDI_LISTEN_PORT
         int "MIDI 2.0 Listen Port"
-        default 5507
+        default 5506
         range 1024 65535
         help
             UDP port to listen for MIDI 2.0 network connections.
 
     config MIDI_SESSION_MONITOR_STACK
         int "Session monitor task stack size"
-        default 2048
+        default 4096
         range 1024 8192
         help
             Stack size in bytes for the session monitor task.
 
     config MIDI_SEND_TASK_STACK
         int "MIDI send task stack size"
-        default 2048
+        default 4096
         range 1024 8192
         help
             Stack size in bytes for the MIDI send task.

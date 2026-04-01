@@ -98,8 +98,24 @@ midi_error_t config_manager_init(void) {
         return MIDI_OK;
     }
     
+    // 初始化 NVS flash
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition truncated, erasing...");
+        err = nvs_flash_erase();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to erase NVS: %s", esp_err_to_name(err));
+            return MIDI_ERR_STORAGE_ERROR;
+        }
+        err = nvs_flash_init();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init NVS flash: %s", esp_err_to_name(err));
+        return MIDI_ERR_STORAGE_ERROR;
+    }
+    
     // 打开 NVS 命名空间
-    esp_err_t err = nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &g_nvs_handle);
+    err = nvs_open(CONFIG_NAMESPACE, NVS_READWRITE, &g_nvs_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to open NVS namespace: %s", esp_err_to_name(err));
         return MIDI_ERR_STORAGE_ERROR;
@@ -188,6 +204,28 @@ midi_error_t config_manager_load(system_config_t* config) {
     err = read_u8(g_nvs_handle, KEY_MIDI_DEVICE_MODE, &config->midi.device_mode);
     err = read_u8(g_nvs_handle, KEY_MIDI_DISCOVERY, (uint8_t*)&config->midi.enable_discovery);
     
+    // 检查关键字段是否为空，如果为空则使用默认值
+    if (strlen(config->wifi.ssid) == 0) {
+        ESP_LOGW(TAG, "WiFi SSID is empty, using default");
+        strncpy(config->wifi.ssid, CONFIG_WIFI_SSID, sizeof(config->wifi.ssid) - 1);
+    }
+    if (strlen(config->wifi.password) == 0) {
+        ESP_LOGW(TAG, "WiFi password is empty, using default");
+        strncpy(config->wifi.password, CONFIG_WIFI_PASSWORD, sizeof(config->wifi.password) - 1);
+    }
+    if (strlen(config->midi.device_name) == 0) {
+        ESP_LOGW(TAG, "Device name is empty, using default");
+        strncpy(config->midi.device_name, CONFIG_MIDI_DEVICE_NAME, sizeof(config->midi.device_name) - 1);
+    }
+    if (strlen(config->midi.product_id) == 0) {
+        ESP_LOGW(TAG, "Product ID is empty, using default");
+        strncpy(config->midi.product_id, CONFIG_MIDI_PRODUCT_ID, sizeof(config->midi.product_id) - 1);
+    }
+    if (config->midi.listen_port == 0) {
+        ESP_LOGW(TAG, "Listen port is 0, using default");
+        config->midi.listen_port = CONFIG_MIDI_LISTEN_PORT;
+    }
+    
     ESP_LOGI(TAG, "Configuration loaded successfully");
     ESP_LOGI(TAG, "  WiFi SSID: %s", config->wifi.ssid);
     ESP_LOGI(TAG, "  Device Name: %s", config->midi.device_name);
@@ -216,30 +254,48 @@ midi_error_t config_manager_save(const system_config_t* config) {
         return MIDI_ERR_STORAGE_ERROR;
     }
     
-    // 保存 WiFi 配置
-    err = nvs_set_str(g_nvs_handle, KEY_WIFI_SSID, config->wifi.ssid);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to save WiFi SSID: %s", esp_err_to_name(err));
-        return MIDI_ERR_STORAGE_ERROR;
+    // 保存 WiFi 配置（空字符串不保存）
+    if (strlen(config->wifi.ssid) > 0) {
+        err = nvs_set_str(g_nvs_handle, KEY_WIFI_SSID, config->wifi.ssid);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to save WiFi SSID: %s", esp_err_to_name(err));
+            return MIDI_ERR_STORAGE_ERROR;
+        }
+    } else {
+        ESP_LOGW(TAG, "WiFi SSID is empty, skipping save");
     }
     
-    err = nvs_set_str(g_nvs_handle, KEY_WIFI_PASSWORD, config->wifi.password);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to save WiFi password: %s", esp_err_to_name(err));
-        return MIDI_ERR_STORAGE_ERROR;
+    if (strlen(config->wifi.password) > 0) {
+        err = nvs_set_str(g_nvs_handle, KEY_WIFI_PASSWORD, config->wifi.password);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to save WiFi password: %s", esp_err_to_name(err));
+            return MIDI_ERR_STORAGE_ERROR;
+        }
+    } else {
+        ESP_LOGW(TAG, "WiFi password is empty, skipping save");
     }
     
     err = nvs_set_u8(g_nvs_handle, KEY_WIFI_MAX_RETRY, config->wifi.max_retry);
     err = nvs_set_u8(g_nvs_handle, KEY_WIFI_AUTO_CONN, config->wifi.auto_connect ? 1 : 0);
     
-    // 保存 MIDI 配置
-    err = nvs_set_str(g_nvs_handle, KEY_MIDI_DEVICE_NAME, config->midi.device_name);
+    // 保存 MIDI 配置（空字符串不保存，使用默认值）
+    const char* device_name = config->midi.device_name;
+    if (strlen(device_name) == 0) {
+        ESP_LOGW(TAG, "Device name is empty, using default for save");
+        device_name = CONFIG_MIDI_DEVICE_NAME;
+    }
+    err = nvs_set_str(g_nvs_handle, KEY_MIDI_DEVICE_NAME, device_name);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save MIDI device name: %s", esp_err_to_name(err));
         return MIDI_ERR_STORAGE_ERROR;
     }
     
-    err = nvs_set_str(g_nvs_handle, KEY_MIDI_PRODUCT_ID, config->midi.product_id);
+    const char* product_id = config->midi.product_id;
+    if (strlen(product_id) == 0) {
+        ESP_LOGW(TAG, "Product ID is empty, using default for save");
+        product_id = CONFIG_MIDI_PRODUCT_ID;
+    }
+    err = nvs_set_str(g_nvs_handle, KEY_MIDI_PRODUCT_ID, product_id);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to save MIDI product ID: %s", esp_err_to_name(err));
         return MIDI_ERR_STORAGE_ERROR;

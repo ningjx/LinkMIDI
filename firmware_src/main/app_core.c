@@ -226,8 +226,9 @@ static void session_monitor_task(void* arg) {
         bool session_was_active = get_session_active();
         
         if (is_active && !session_was_active) {
-            // 会话新建 - 发布事件
-            event_bus_publish_session_established(0, "remote");
+            // 会话新建 - 发布事件，获取远程设备名
+            const char* remote_name = network_midi2_get_remote_device_name(g_app.midi2_ctx);
+            event_bus_publish_session_established(0, remote_name ? remote_name : "remote");
         } else if (!is_active && session_was_active) {
             // 会话关闭 - 发布事件
             event_bus_publish_session_terminated();
@@ -324,6 +325,11 @@ midi_error_t app_core_init(const app_config_t* config) {
     g_app.config.listen_port = g_app.sys_config.midi.listen_port;
     g_app.config.enable_test_sender = config ? config->enable_test_sender : false;
     
+    ESP_LOGI(TAG, "Config loaded: device_name='%s', product_id='%s', listen_port=%d",
+             g_app.config.device_name ? g_app.config.device_name : "NULL",
+             g_app.config.product_id ? g_app.config.product_id : "NULL",
+             g_app.config.listen_port);
+    
     // 创建互斥锁
     g_app.mutex = xSemaphoreCreateMutex();
     if (!g_app.mutex) {
@@ -373,44 +379,56 @@ midi_error_t app_core_start(void) {
         return MIDI_ERR_NET_INIT_FAILED;
     }
     
-    if (!wifi_manager_connect()) {
-        ESP_LOGE(TAG, "Failed to configure WiFi");
-        return MIDI_ERR_CONFIG_INVALID;
+    // 2. 尝试连接存储的WiFi
+    ESP_LOGI(TAG, "Attempting to connect to saved WiFi...");
+    bool wifi_connected = false;
+    
+    if (wifi_manager_connect(NULL, NULL)) {
+        // 等待连接，30秒超时
+        wifi_connected = wifi_manager_wait_for_connection(WIFI_CONNECT_TIMEOUT_MS);
     }
     
-    if (!wifi_manager_wait_for_connection(10000)) {
-        ESP_LOGW(TAG, "WiFi connection timeout, continuing anyway...");
-    }
-    
-    // 发布 WiFi 连接事件
-    if (wifi_manager_is_connected()) {
+    if (wifi_connected) {
+        ESP_LOGI(TAG, "WiFi connected successfully!");
         event_bus_publish_wifi_connected();
+        
+        // 3. 初始化 OTA 管理器
+        ESP_LOGI(TAG, "Initializing OTA manager...");
+        midi_error_t err = ota_manager_init();
+        if (err != MIDI_OK) {
+            ESP_LOGW(TAG, "Failed to init OTA manager, continuing without OTA");
+        }
+        
+        // 检查是否需要验证OTA
+        if (ota_manager_needs_validation()) {
+            ESP_LOGI(TAG, "Validating OTA update...");
+            ota_manager_mark_valid();
+        }
+    } else {
+        // WiFi连接失败，启动AP模式进行配网
+        ESP_LOGW(TAG, "WiFi connection failed, starting AP mode for provisioning...");
+        
+        if (!wifi_manager_start_ap_mode()) {
+            ESP_LOGE(TAG, "Failed to start AP mode");
+            return MIDI_ERR_NET_INIT_FAILED;
+        }
+        
+        ESP_LOGI(TAG, "=== AP Mode Started ===");
+        ESP_LOGI(TAG, "  SSID: LinkMidi");
+        ESP_LOGI(TAG, "  Password: linkmidi");
+        ESP_LOGI(TAG, "  Connect to this WiFi and configure at http://192.168.4.1");
     }
     
-    // 2. 初始化 OTA 管理器
-    ESP_LOGI(TAG, "Initializing OTA manager...");
-    midi_error_t err = ota_manager_init();
-    if (err != MIDI_OK) {
-        ESP_LOGW(TAG, "Failed to init OTA manager, continuing without OTA");
-    }
-    
-    // 检查是否需要验证OTA
-    if (ota_manager_needs_validation()) {
-        ESP_LOGI(TAG, "Validating OTA update...");
-        ota_manager_mark_valid();
-    }
-    
-    // 3. 初始化 Web 配置服务器
+    // 3. 初始化 Web 配置服务器 (AP模式和STA模式都启动)
     ESP_LOGI(TAG, "Initializing Web config server...");
     web_server_config_t web_config = {
         .port = 80,
         .enable_captive_portal = true,
     };
-    err = web_config_server_init(&web_config);
+    midi_error_t err = web_config_server_init(&web_config);
     if (err != MIDI_OK) {
         ESP_LOGW(TAG, "Failed to init Web server, continuing without Web UI");
     } else {
-        // 启动Web服务器
         err = web_config_server_start();
         if (err != MIDI_OK) {
             ESP_LOGW(TAG, "Failed to start Web server");
@@ -419,60 +437,67 @@ midi_error_t app_core_start(void) {
         }
     }
     
-    // 4. 初始化 Network MIDI 2.0
-    ESP_LOGI(TAG, "Initializing Network MIDI 2.0...");
-    network_midi2_config_t midi2_cfg = {
-        .device_name = g_app.config.device_name,
-        .product_id = g_app.config.product_id,
-        .listen_port = g_app.config.listen_port,
-        .mode = MODE_SERVER,
-        .enable_discovery = true,
-        .log_callback = midi2_log_callback,
-        .midi_rx_callback = midi2_midi_rx_callback,
-        .ump_rx_callback = midi2_ump_rx_callback,
-    };
-    
-    g_app.midi2_ctx = network_midi2_init_with_config(&midi2_cfg);
-    if (!g_app.midi2_ctx) {
-        ESP_LOGE(TAG, "Failed to init Network MIDI 2.0");
-        return MIDI_ERR_NO_MEM;
+    // 4. 以下服务只在WiFi连接成功时启动
+    if (wifi_connected) {
+        // 初始化 Network MIDI 2.0
+        ESP_LOGI(TAG, "Initializing Network MIDI 2.0...");
+        network_midi2_config_t midi2_cfg = {
+            .device_name = g_app.config.device_name,
+            .product_id = g_app.config.product_id,
+            .listen_port = g_app.config.listen_port,
+            .mode = MODE_SERVER,
+            .enable_discovery = false,  // 使用独立的mdns_discovery模块，避免端口冲突
+            .log_callback = midi2_log_callback,
+            .midi_rx_callback = midi2_midi_rx_callback,
+            .ump_rx_callback = midi2_ump_rx_callback,
+        };
+        
+        g_app.midi2_ctx = network_midi2_init_with_config(&midi2_cfg);
+        if (!g_app.midi2_ctx) {
+            ESP_LOGE(TAG, "Failed to init Network MIDI 2.0");
+            return MIDI_ERR_NO_MEM;
+        }
+        
+        // 初始化 mDNS 发现
+        ESP_LOGI(TAG, "Initializing mDNS discovery...");
+        g_app.mdns_ctx = mdns_discovery_init(
+            g_app.config.device_name,
+            g_app.config.product_id,
+            g_app.config.listen_port
+        );
+        if (!g_app.mdns_ctx) {
+            ESP_LOGE(TAG, "Failed to init mDNS");
+            network_midi2_deinit(g_app.midi2_ctx);
+            g_app.midi2_ctx = NULL;
+            return MIDI_ERR_NET_MDNS_FAILED;
+        }
+        
+        if (!mdns_discovery_start(g_app.mdns_ctx)) {
+            ESP_LOGE(TAG, "Failed to start mDNS");
+            mdns_discovery_deinit(g_app.mdns_ctx);
+            network_midi2_deinit(g_app.midi2_ctx);
+            g_app.midi2_ctx = NULL;
+            g_app.mdns_ctx = NULL;
+            return MIDI_ERR_NET_MDNS_FAILED;
+        }
+        
+        // 启动 MIDI 2.0 服务
+        if (!network_midi2_start(g_app.midi2_ctx)) {
+            ESP_LOGE(TAG, "Failed to start MIDI 2.0");
+            mdns_discovery_stop(g_app.mdns_ctx);
+            mdns_discovery_deinit(g_app.mdns_ctx);
+            network_midi2_deinit(g_app.midi2_ctx);
+            g_app.midi2_ctx = NULL;
+            g_app.mdns_ctx = NULL;
+            return MIDI_ERR_SESSION_INIT_FAILED;
+        }
+        
+        ESP_LOGI(TAG, "Network MIDI 2.0 service started on port %d", g_app.config.listen_port);
+    } else {
+        ESP_LOGI(TAG, "Network MIDI 2.0 not started (AP mode - waiting for WiFi config)");
     }
     
-    // 5. 初始化 mDNS 发现
-    ESP_LOGI(TAG, "Initializing mDNS discovery...");
-    g_app.mdns_ctx = mdns_discovery_init(
-        g_app.config.device_name,
-        g_app.config.product_id,
-        g_app.config.listen_port
-    );
-    if (!g_app.mdns_ctx) {
-        ESP_LOGE(TAG, "Failed to init mDNS");
-        network_midi2_deinit(g_app.midi2_ctx);
-        g_app.midi2_ctx = NULL;
-        return MIDI_ERR_NET_MDNS_FAILED;
-    }
-    
-    if (!mdns_discovery_start(g_app.mdns_ctx)) {
-        ESP_LOGE(TAG, "Failed to start mDNS");
-        mdns_discovery_deinit(g_app.mdns_ctx);
-        network_midi2_deinit(g_app.midi2_ctx);
-        g_app.midi2_ctx = NULL;
-        g_app.mdns_ctx = NULL;
-        return MIDI_ERR_NET_MDNS_FAILED;
-    }
-    
-    // 6. 启动 MIDI 2.0 服务
-    if (!network_midi2_start(g_app.midi2_ctx)) {
-        ESP_LOGE(TAG, "Failed to start MIDI 2.0");
-        mdns_discovery_stop(g_app.mdns_ctx);
-        mdns_discovery_deinit(g_app.mdns_ctx);
-        network_midi2_deinit(g_app.midi2_ctx);
-        g_app.midi2_ctx = NULL;
-        g_app.mdns_ctx = NULL;
-        return MIDI_ERR_SESSION_INIT_FAILED;
-    }
-    
-    // 7. 初始化 USB MIDI Host
+    // 5. 初始化 USB MIDI Host
     ESP_LOGI(TAG, "Initializing USB MIDI Host...");
     usb_midi_host_config_t usb_cfg = {
         .midi_rx_callback = usb_midi_rx_callback,

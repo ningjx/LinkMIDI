@@ -200,7 +200,10 @@ int nm2_protocol_build_inv(uint8_t* buffer, int max_len,
 
 int nm2_protocol_build_inv_accepted(uint8_t* buffer, int max_len,
                                      const char* name, const char* product_id) {
-    if (!buffer || !name) return -1;
+    if (!buffer || !name) {
+        ESP_LOGW(TAG, "INV_ACCEPTED: invalid params buffer=%p, name=%p", buffer, name);
+        return -1;
+    }
     
     int name_len = strlen(name);
     int product_len = product_id ? strlen(product_id) : 0;
@@ -208,6 +211,9 @@ int nm2_protocol_build_inv_accepted(uint8_t* buffer, int max_len,
     int product_words = to_words(product_len);
     int payload_words = name_words + product_words;
     int total_len = 4 + payload_words * 4;
+    
+    ESP_LOGI(TAG, "INV_ACCEPTED: name='%s' len=%d, product='%s' len=%d, name_words=%d, payload_words=%d",
+             name, name_len, product_id ? product_id : "NULL", product_len, name_words, payload_words);
     
     if (total_len > max_len) {
         ESP_LOGW(TAG, "INV_ACCEPTED too large");

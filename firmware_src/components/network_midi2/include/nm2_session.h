@@ -249,6 +249,41 @@ midi_error_t nm2_session_send_keepalive(nm2_session_t* session, int socket);
  */
 void nm2_session_update_activity(nm2_session_t* session);
 
+/* ============================================================================
+ * 超时检查 API
+ * ============================================================================ */
+
+/**
+ * @brief 检查邀请是否超时
+ * 
+ * 邀请发送后30秒内未收到响应视为超时
+ */
+bool nm2_session_is_invitation_timeout(const nm2_session_t* session);
+
+/**
+ * @brief 检查保活是否超时
+ * 
+ * 连续3次PING未收到PONG响应视为超时
+ */
+bool nm2_session_is_keepalive_timeout(const nm2_session_t* session);
+
+/**
+ * @brief 检查会话是否超时 (无活动)
+ * 
+ * 30秒内无任何数据交换视为超时
+ */
+bool nm2_session_is_session_timeout(const nm2_session_t* session);
+
+/**
+ * @brief 处理超时 - 终止会话
+ */
+midi_error_t nm2_session_handle_timeout(nm2_session_t* session, int socket);
+
+/**
+ * @brief 清理重传缓冲区中的过期条目
+ */
+void nm2_session_clean_retransmit_buffer(nm2_session_t* session);
+
 #ifdef __cplusplus
 }
 #endif

@@ -66,7 +66,7 @@ GND          ────────> USB GND
 | `CONFIG_WIFI_SSID` | - | WiFi 网络名称 |
 | `CONFIG_WIFI_PASSWORD` | - | WiFi 密码 |
 | `CONFIG_WIFI_MAXIMUM_RETRY` | 5 | 最大重试次数 |
-| `CONFIG_MIDI_DEVICE_NAME` | ESP32-MIDI2 | 设备名称 |
+| `CONFIG_MIDI_DEVICE_NAME` | Link MIDI | 设备名称 |
 | `CONFIG_MIDI_LISTEN_PORT` | 5507 | UDP 监听端口 |
 
 ## 文档

@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <string.h>
+#include <inttypes.h>
 
 static const char* TAG = "MDNS_DISCOVERY";
 
@@ -103,28 +104,77 @@ bool mdns_discovery_start(mdns_discovery_context_t* ctx) {
         return false;
     }
     
-    // Set hostname
-    err = mdns_hostname_set(ctx->device_name);
+    // Set hostname - must be lowercase letters, numbers, and hyphens only
+    // Convert device_name to valid hostname format
+    char hostname[64];
+    int j = 0;
+    for (int i = 0; ctx->device_name[i] && j < sizeof(hostname) - 1; i++) {
+        char c = ctx->device_name[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = c - 'A' + 'a';  // Convert to lowercase
+        }
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+            hostname[j++] = c;
+        } else if (c == ' ' || c == '_') {
+            hostname[j++] = '-';  // Replace spaces and underscores with hyphens
+        }
+    }
+    hostname[j] = '\0';
+    
+    // Remove leading/trailing hyphens
+    while (j > 0 && hostname[j-1] == '-') {
+        hostname[--j] = '\0';
+    }
+    int start = 0;
+    while (hostname[start] == '-') start++;
+    if (start > 0) {
+        memmove(hostname, hostname + start, j - start + 1);
+    }
+    
+    // Ensure hostname is not empty
+    if (strlen(hostname) == 0) {
+        strcpy(hostname, "esp32-midi2");
+    }
+    
+    err = mdns_hostname_set(hostname);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set hostname: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to set hostname '%s': %s", hostname, esp_err_to_name(err));
         mdns_free();
         return false;
     }
+    ESP_LOGI(TAG, "mDNS hostname set to: %s", hostname);
     
-    // Set instance name
-    err = mdns_instance_name_set(ctx->product_id);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to set instance name: %s", esp_err_to_name(err));
-        // Not critical, continue
+    // Prepare TXT records for MIDI 2.0 discovery
+    // Format matching MidiBridge Test project:
+    // - productInstanceId=<unique_id> (lowercase key name!)
+    
+    // Generate a simple product instance ID from device name
+    uint32_t hash = 0;
+    const char* p = ctx->device_name;
+    while (*p) {
+        hash = hash * 31 + *p++;
     }
     
-    // Add MIDI 2.0 service (_midi2._udp)
-    err = mdns_service_add(NULL, "_midi2", "_udp", ctx->listen_port, NULL, 0);
+    char product_instance_id[17];  // 16 hex chars + null
+    snprintf(product_instance_id, sizeof(product_instance_id), "%08" PRIx32 "%08" PRIx32, hash, hash ^ 0xFFFFFFFF);
+    
+    // Create TXT items - use lowercase "productInstanceId" to match MidiBridge Test
+    mdns_txt_item_t txt_records[] = {
+        {"productInstanceId", product_instance_id},  // lowercase key!
+    };
+    
+    // Add MIDI 2.0 service (_midi2._udp) with TXT records
+    // Service instance name: just use device name (matching Test project format)
+    err = mdns_service_add(ctx->device_name, "_midi2", "_udp", ctx->listen_port, txt_records, 
+                          sizeof(txt_records) / sizeof(txt_records[0]));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to add MIDI 2.0 service: %s", esp_err_to_name(err));
         mdns_free();
         return false;
     }
+    
+    ESP_LOGI(TAG, "mDNS service added: %s._midi2._udp.local, productInstanceId=%s", 
+             ctx->device_name, product_instance_id);
     
     ctx->is_running = true;
     ESP_LOGI(TAG, "mDNS discovery started (hostname: %s, port: %d)", 

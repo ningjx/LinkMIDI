@@ -95,9 +95,50 @@ static void receive_task(void* arg) {
                     
                     ESP_LOGD(TAG, "RX UMP: seq=%d, len=%d", seq, ump_len);
                     
-                    // 更新最后接收的序列号
-                    if (transport->session) {
-                        nm2_session_update_last_received_seq(transport->session, seq);
+                    // 丢包检测 (参考 MIDI.org 实现指南)
+                    if (transport->session && nm2_session_is_active(transport->session)) {
+                        uint16_t last_seq = nm2_session_get_last_received_seq(transport->session);
+                        uint16_t expected_seq = (last_seq == 0) ? seq : (last_seq + 1);
+                        
+                        // 检查序列号是否连续
+                        if (seq == expected_seq || last_seq == 0) {
+                            // 正常顺序，更新序列号
+                            nm2_session_update_last_received_seq(transport->session, seq);
+                        } else if (nm2_protocol_is_sequence_newer(seq, last_seq)) {
+                            // 检测到丢包 - 序列号间隙
+                            int32_t lost_count = nm2_protocol_sequence_diff(seq, expected_seq);
+                            ESP_LOGW(TAG, "Packet loss detected: expected=%d, got=%d, lost=%d", 
+                                     expected_seq, seq, lost_count);
+                            
+                            // 发送重传请求
+                            if (nm2_session_supports_retransmit(transport->session) && lost_count > 0 && lost_count < 64) {
+                                nm2_session_info_t info;
+                                if (nm2_session_get_info(transport->session, &info)) {
+                                    uint8_t retransmit_pkt[NM2_MAX_PACKET_SIZE];
+                                    int pkt_len = nm2_protocol_build_retransmit_request(
+                                        retransmit_pkt, sizeof(retransmit_pkt),
+                                        expected_seq, (uint16_t)lost_count);
+                                    
+                                    if (pkt_len > 0) {
+                                        struct sockaddr_in dest = {0};
+                                        dest.sin_family = AF_INET;
+                                        dest.sin_addr.s_addr = info.ip_address;
+                                        dest.sin_port = htons(info.port);
+                                        sendto(transport->socket, retransmit_pkt, pkt_len, 0,
+                                               (struct sockaddr*)&dest, sizeof(dest));
+                                        ESP_LOGI(TAG, "Sent RETRANSMIT_REQUEST: seq=%d, count=%d", 
+                                                 expected_seq, lost_count);
+                                    }
+                                }
+                            }
+                            
+                            // 更新序列号到当前接收的值
+                            nm2_session_update_last_received_seq(transport->session, seq);
+                        } else {
+                            // 旧包或重复包 - 可能是重传的包
+                            ESP_LOGD(TAG, "Received old/duplicate packet: seq=%d, last=%d", seq, last_seq);
+                            // 不更新序列号，但仍然处理数据
+                        }
                     }
                     
                     if (transport->ump_callback) {
@@ -170,9 +211,120 @@ static void receive_task(void* arg) {
                 break;
             }
             
+            case NM2_CMD_RETRANSMIT_ERROR: {
+                // 重传错误 - 对方无法重传请求的包
+                ESP_LOGW(TAG, "Received RETRANSMIT_ERROR");
+                if (transport->session) {
+                    nm2_retransmit_error_t reason = (nm2_retransmit_error_t)cmd.specific1;
+                    uint16_t seq = ((uint16_t)cmd.payload[0] << 8) | cmd.payload[1];
+                    ESP_LOGW(TAG, "Retransmit error: reason=%d, seq=%d", reason, seq);
+                    
+                    // 记录重传失败 - 可以触发会话重置或继续
+                    // 根据MidiBridge实现，可以选择发送SESSION_RESET或继续接收
+                    nm2_session_update_activity(transport->session);
+                }
+                break;
+            }
+            
+            case NM2_CMD_NAK: {
+                // 收到NAK - 对方报告错误
+                ESP_LOGW(TAG, "Received NAK");
+                nm2_nak_reason_t reason = (nm2_nak_reason_t)cmd.specific1;
+                ESP_LOGW(TAG, "NAK reason: %d", reason);
+                // 根据原因进行相应处理
+                break;
+            }
+            
+            case NM2_CMD_PING: {
+                // 收到PING - 发送PING_REPLY
+                ESP_LOGD(TAG, "Received PING");
+                uint32_t ping_id = 0;
+                if (nm2_protocol_parse_ping(&cmd, &ping_id)) {
+                    uint8_t reply[NM2_MAX_PACKET_SIZE];
+                    int reply_len = nm2_protocol_build_ping_reply(reply, sizeof(reply), ping_id);
+                    
+                    if (reply_len > 0) {
+                        struct sockaddr_in dest = {0};
+                        dest.sin_family = AF_INET;
+                        dest.sin_addr = from_addr.sin_addr;
+                        dest.sin_port = from_addr.sin_port;
+                        sendto(transport->socket, reply, reply_len, 0,
+                               (struct sockaddr*)&dest, sizeof(dest));
+                        ESP_LOGD(TAG, "Sent PING_REPLY: id=0x%08X", ping_id);
+                        
+                        if (transport->session) {
+                            nm2_session_update_activity(transport->session);
+                        }
+                    }
+                }
+                break;
+            }
+            
+            case NM2_CMD_PING_REPLY: {
+                // 收到PING_REPLY - 保活响应
+                ESP_LOGD(TAG, "Received PING_REPLY");
+                if (transport->session) {
+                    nm2_session_update_activity(transport->session);
+                }
+                break;
+            }
+            
+            case NM2_CMD_BYE: {
+                // 收到BYE - 会话终止
+                ESP_LOGI(TAG, "Received BYE");
+                if (transport->session) {
+                    nm2_session_handle_termination(transport->session, buffer, len);
+                    
+                    // 发送BYE_REPLY
+                    uint8_t reply[NM2_MAX_PACKET_SIZE];
+                    int reply_len = nm2_protocol_build_bye_reply(reply, sizeof(reply));
+                    if (reply_len > 0) {
+                        struct sockaddr_in dest = {0};
+                        dest.sin_family = AF_INET;
+                        dest.sin_addr = from_addr.sin_addr;
+                        dest.sin_port = from_addr.sin_port;
+                        sendto(transport->socket, reply, reply_len, 0,
+                               (struct sockaddr*)&dest, sizeof(dest));
+                    }
+                }
+                break;
+            }
+            
+            case NM2_CMD_BYE_REPLY: {
+                // 收到BYE_REPLY - 确认终止
+                ESP_LOGI(TAG, "Received BYE_REPLY");
+                if (transport->session) {
+                    nm2_session_handle_termination(transport->session, buffer, len);
+                }
+                break;
+            }
+            
             default:
-                // 其他命令由上层处理
-                ESP_LOGD(TAG, "Received command: 0x%02X", cmd.command);
+                // 未知命令 - 发送NAK
+                ESP_LOGW(TAG, "Received unknown command: 0x%02X", cmd.command);
+                
+                // 发送NAK响应
+                if (transport->session && nm2_session_is_active(transport->session)) {
+                    nm2_session_info_t info;
+                    if (nm2_session_get_info(transport->session, &info)) {
+                        uint8_t nak_pkt[NM2_MAX_PACKET_SIZE];
+                        uint8_t original_header[4] = {cmd.command, cmd.payload_words, cmd.specific1, cmd.specific2};
+                        int nak_len = nm2_protocol_build_nak(nak_pkt, sizeof(nak_pkt),
+                                                              NM2_NAK_CMD_NOT_SUPPORTED,
+                                                              original_header,
+                                                              "Command not supported");
+                        
+                        if (nak_len > 0) {
+                            struct sockaddr_in dest = {0};
+                            dest.sin_family = AF_INET;
+                            dest.sin_addr.s_addr = info.ip_address;
+                            dest.sin_port = htons(info.port);
+                            sendto(transport->socket, nak_pkt, nak_len, 0,
+                                   (struct sockaddr*)&dest, sizeof(dest));
+                            ESP_LOGD(TAG, "Sent NAK for unknown command");
+                        }
+                    }
+                }
                 break;
         }
     }

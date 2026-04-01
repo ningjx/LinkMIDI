@@ -242,7 +242,7 @@ typedef struct {
 | `CONFIG_WIFI_PASSWORD` | string | - | WiFi 密码 |
 | `CONFIG_WIFI_MAXIMUM_RETRY` | int | 5 | 最大重试次数 |
 | `CONFIG_WIFI_SCAN_METHOD` | int | 0 | 扫描方式 |
-| `CONFIG_MIDI_DEVICE_NAME` | string | ESP32-MIDI2 | 设备名 |
+| `CONFIG_MIDI_DEVICE_NAME` | string | Link MIDI | 设备名 |
 | `CONFIG_MIDI_PRODUCT_ID` | string | ESP32S3 | 产品ID |
 | `CONFIG_MIDI_LISTEN_PORT` | int | 5507 | UDP 端口 |
 
