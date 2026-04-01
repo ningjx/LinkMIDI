@@ -20,7 +20,6 @@ void app_main(void) {
         .device_name = APP_DEVICE_NAME,
         .product_id = APP_PRODUCT_ID,
         .listen_port = APP_LISTEN_PORT,
-        .enable_test_sender = true,  // 启用测试发送器
     };
     
     // 初始化应用核心

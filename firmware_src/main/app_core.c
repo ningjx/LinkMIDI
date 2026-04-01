@@ -37,7 +37,6 @@ typedef struct {
     
     /* 任务句柄 */
     TaskHandle_t session_monitor_task;
-    TaskHandle_t test_midi_task;
     
     /* 模块句柄 */
     network_midi2_context_t* midi2_ctx;
@@ -103,17 +102,21 @@ static void on_midi_data_event(const event_t* event, void* user_data) {
     
     // 如果来自 USB 且会话激活，转发到网络
     if (midi->source == 0 && get_session_active() && g_app.midi2_ctx) {
-        if (midi->length >= 3) {
+        if (midi->length > 0) {
+            uint8_t status = midi->data[0];
+            uint8_t data1 = midi->length > 1 ? midi->data[1] : 0;
+            uint8_t data2 = midi->length > 2 ? midi->data[2] : 0;
+            
             midi_error_t err = network_midi2_send_midi(
                 g_app.midi2_ctx,
-                midi->data[0],  // status
-                midi->data[1],  // data1
-                midi->data[2]   // data2
+                status,
+                data1,
+                data2
             );
             if (err != MIDI_OK) {
                 ESP_LOGW(TAG, "Failed to forward MIDI: %s", midi_error_str(err));
             } else {
-                ESP_LOGI(TAG, "[MIDI_FWD] Forwarded to network");
+                ESP_LOGI(TAG, "[MIDI_FWD] Forwarded to network: Status=0x%02X", status);
             }
         }
     }
@@ -239,37 +242,6 @@ static void session_monitor_task(void* arg) {
 }
 
 /* ============================================================================
- * 测试 MIDI 发送任务
- * ============================================================================ */
-
-static void test_midi_send_task(void* arg) {
-    ESP_LOGI(TAG, "Test MIDI send task started");
-    
-    uint8_t note = 60;      // C4
-    uint8_t velocity = 100;
-    uint8_t channel = 0;
-    bool note_on = true;
-    
-    while (g_app.running) {
-        vTaskDelay(pdMS_TO_TICKS(APP_MIDI_SEND_INTERVAL_MS));
-        
-        if (get_session_active() && g_app.midi2_ctx) {
-            if (note_on) {
-                ESP_LOGI(TAG, "[TEST] Sending Note ON - C4");
-                network_midi2_send_note_on(g_app.midi2_ctx, note, velocity, channel);
-                note_on = false;
-            } else {
-                ESP_LOGI(TAG, "[TEST] Sending Note OFF - C4");
-                network_midi2_send_note_off(g_app.midi2_ctx, note, 0, channel);
-                note_on = true;
-            }
-        }
-    }
-    
-    vTaskDelete(NULL);
-}
-
-/* ============================================================================
  * 公共 API
  * ============================================================================ */
 
@@ -323,7 +295,6 @@ midi_error_t app_core_init(const app_config_t* config) {
     g_app.config.device_name = g_app.sys_config.midi.device_name;
     g_app.config.product_id = g_app.sys_config.midi.product_id;
     g_app.config.listen_port = g_app.sys_config.midi.listen_port;
-    g_app.config.enable_test_sender = config ? config->enable_test_sender : false;
     
     ESP_LOGI(TAG, "Config loaded: device_name='%s', product_id='%s', listen_port=%d",
              g_app.config.device_name ? g_app.config.device_name : "NULL",
@@ -538,16 +509,6 @@ midi_error_t app_core_start(void) {
         return MIDI_ERR_NO_MEM;
     }
     
-    if (g_app.config.enable_test_sender) {
-        ret = xTaskCreate(test_midi_send_task, "test_midi", APP_MIDI_SEND_STACK,
-                    NULL, APP_MIDI_SEND_PRIORITY, &g_app.test_midi_task);
-        if (ret != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create test MIDI task");
-            // 非致命错误，继续运行
-            g_app.test_midi_task = NULL;
-        }
-    }
-    
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "LinkMIDI Service RUNNING");
     ESP_LOGI(TAG, "Device: %s", g_app.config.device_name);
@@ -571,11 +532,6 @@ midi_error_t app_core_stop(void) {
     if (g_app.session_monitor_task) {
         vTaskDelete(g_app.session_monitor_task);
         g_app.session_monitor_task = NULL;
-    }
-    
-    if (g_app.test_midi_task) {
-        vTaskDelete(g_app.test_midi_task);
-        g_app.test_midi_task = NULL;
     }
     
     // 停止各模块

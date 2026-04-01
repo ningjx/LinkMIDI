@@ -23,7 +23,6 @@ typedef struct {
     const char* device_name;
     const char* product_id;
     uint16_t listen_port;
-    bool enable_test_sender;    ///< 是否启用测试发送器 (每秒发送 C4)
 } app_config_t;
 
 /**
