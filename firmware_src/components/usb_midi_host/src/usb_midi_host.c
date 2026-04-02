@@ -207,7 +207,8 @@ static void parse_midi_packet(const uint8_t *packet, uint8_t *midi_data, uint8_t
         case MIDI_CIN_PITCH_BEND:
             midi_data[0] = packet[1];
             midi_data[1] = packet[2];
-            *midi_len = 2;
+            midi_data[2] = packet[3];
+            *midi_len = 3;
             break;
         case MIDI_CIN_SYSEX_START:
         case MIDI_CIN_SYSEX_END_3:
