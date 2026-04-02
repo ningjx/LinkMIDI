@@ -88,6 +88,74 @@ static bool get_session_active(void) {
 }
 
 /* ============================================================================
+ * Web Server 状态回调函数
+ * ============================================================================ */
+
+/**
+ * @brief WiFi 模式回调 (包装函数)
+ */
+static int wifi_get_mode_callback(void) {
+    int mode = (int)wifi_manager_get_mode();
+    ESP_LOGI(TAG, "[CALLBACK] wifi_get_mode = %d", mode);
+    return mode;
+}
+
+/**
+ * @brief WiFi IP 地址回调 (包装函数)
+ */
+static void wifi_get_ip_callback(char* ip_str, size_t len) {
+    if (ip_str && len > 0) {
+        wifi_manager_get_ip(ip_str);
+        ESP_LOGI(TAG, "[CALLBACK] wifi_get_ip = %s", ip_str);
+    }
+}
+
+/**
+ * @brief USB 设备数量回调
+ */
+static uint8_t usb_get_device_count_callback(void) {
+    if (g_app.usb_midi_ctx) {
+        return usb_midi_host_get_device_count(g_app.usb_midi_ctx);
+    }
+    return 0;
+}
+
+/**
+ * @brief USB 运行状态回调
+ */
+static bool usb_is_running_callback(void) {
+    return g_app.usb_midi_ctx && usb_midi_host_is_running(g_app.usb_midi_ctx);
+}
+
+/**
+ * @brief NM2 会话状态回调
+ */
+static bool nm2_is_session_active_callback(void) {
+    return get_session_active();
+}
+
+/**
+ * @brief NM2 远程设备名称回调
+ */
+static const char* nm2_get_remote_name_callback(void) {
+    if (g_app.midi2_ctx) {
+        return network_midi2_get_remote_device_name(g_app.midi2_ctx);
+    }
+    return NULL;
+}
+
+/**
+ * @brief NM2 发送 MIDI 回调
+ */
+static bool nm2_send_midi_callback(uint8_t status, uint8_t data1, uint8_t data2) {
+    if (g_app.midi2_ctx && get_session_active()) {
+        midi_error_t err = network_midi2_send_midi(g_app.midi2_ctx, status, data1, data2);
+        return err == MIDI_OK;
+    }
+    return false;
+}
+
+/* ============================================================================
  * 事件处理
  * ============================================================================ */
 
@@ -400,6 +468,21 @@ midi_error_t app_core_start(void) {
     if (err != MIDI_OK) {
         ESP_LOGW(TAG, "Failed to init Web server, continuing without Web UI");
     } else {
+        // 注册状态回调
+        web_status_callbacks_t callbacks = {
+            .wifi_get_mode = wifi_get_mode_callback,
+            .wifi_is_connected = wifi_manager_is_connected,
+            .wifi_get_ip = wifi_get_ip_callback,
+            .usb_get_device_count = usb_get_device_count_callback,
+            .usb_is_running = usb_is_running_callback,
+            .nm2_is_session_active = nm2_is_session_active_callback,
+            .nm2_get_remote_name = nm2_get_remote_name_callback,
+            .nm2_send_midi = nm2_send_midi_callback,
+        };
+        ESP_LOGI(TAG, "Registering callbacks: mode=%p, connected=%p, ip=%p", 
+            callbacks.wifi_get_mode, callbacks.wifi_is_connected, callbacks.wifi_get_ip);
+        web_config_server_register_callbacks(&callbacks);
+        
         err = web_config_server_start();
         if (err != MIDI_OK) {
             ESP_LOGW(TAG, "Failed to start Web server");
@@ -667,4 +750,18 @@ midi_error_t app_core_update_midi_config(const char* device_name, uint16_t liste
     
     ESP_LOGI(TAG, "MIDI config updated: Name=%s, Port=%d", device_name, listen_port);
     return MIDI_OK;
+}
+
+network_midi2_context_t* app_core_get_midi2_context(void) {
+    if (!g_app.initialized) {
+        return NULL;
+    }
+    return g_app.midi2_ctx;
+}
+
+usb_midi_host_context_t* app_core_get_usb_midi_context(void) {
+    if (!g_app.initialized) {
+        return NULL;
+    }
+    return g_app.usb_midi_ctx;
 }

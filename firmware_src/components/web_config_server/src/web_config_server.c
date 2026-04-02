@@ -5,6 +5,7 @@
 
 #include "web_config_server.h"
 #include "config_manager.h"
+// WiFi status is obtained via callbacks, not direct include
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -25,6 +26,9 @@ static httpd_handle_t g_server = NULL;
 static bool g_running = false;
 static uint16_t g_port = 80;
 
+// 状态回调函数
+static web_status_callbacks_t g_status_callbacks = {0};
+
 // SoftAP配置
 #define AP_SSID "LinkMIDI-Setup"
 #define AP_PASSWORD "12345678"
@@ -36,213 +40,112 @@ static uint16_t g_port = 80;
 
 static const char* html_index = 
 "<!DOCTYPE html>"
-"<html lang='zh-CN'>"
-"<head>"
-"<meta charset='UTF-8'>"
-"<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
-"<title>LinkMIDI 配置</title>"
+"<html><head>"
+"<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+"<title>LinkMIDI</title>"
 "<style>"
-"body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }"
-".container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }"
-"h1 { color: #333; text-align: center; }"
-".section { margin: 20px 0; padding: 15px; background: #f9f9f9; border-radius: 5px; }"
-"label { display: block; margin: 10px 0 5px; font-weight: bold; }"
-"input, select { width: 100%; padding: 10px; margin: 5px 0; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }"
-"button { background: #4CAF50; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; width: 100%; margin: 10px 0; font-size: 16px; }"
-"button:hover { background: #45a049; }"
-"button.danger { background: #f44336; }"
-"button.danger:hover { background: #da190b; }"
-"#status { margin: 10px 0; padding: 10px; border-radius: 5px; display: none; }"
-".success { background: #d4edda; color: #155724; }"
-".error { background: #f8d7da; color: #721c24; }"
+":root{--p:#4CAF50;--d:#f44336;--bg:#f5f5f5;--c:#fff;--t:#333;--b:#e0e0e0}"
+"*{box-sizing:border-box}body{margin:0;font-family:sans-serif;background:var(--bg);color:var(--t)}"
+".container{max-width:800px;margin:0 auto;padding:20px}"
+"h1{text-align:center;margin:0 0 20px}"
+".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin:20px 0}"
+".card{background:var(--c);border-radius:8px;padding:15px;border-left:4px solid var(--b);box-shadow:0 2px 6px #0001}"
+".card.on{border-left-color:var(--p)}"
+".card h3{margin:5px 0;font-size:13px;font-weight:500;color:#666}"
+".card .st{font-size:18px;font-weight:600;margin:8px 0}"
+".card .dt{font-size:12px;color:#888}"
+".panel{background:var(--c);border-radius:8px;padding:20px;margin:20px 0;box-shadow:0 2px 6px #0001}"
+".panel h2{margin:0 0 15px;font-size:16px;border-bottom:1px solid var(--b);padding-bottom:10px}"
+".fg{margin:12px 0}"
+".fg label{display:block;margin-bottom:5px;font-weight:500;font-size:13px}"
+".fg input,.fg select{width:100%;padding:10px;border:1px solid var(--b);border-radius:6px;font-size:14px}"
+".btn{background:var(--p);color:#fff;border:0;padding:10px 20px;border-radius:6px;cursor:pointer;font-size:14px;width:100%;margin:10px 0}"
+".btn:hover{background:#388E3C}"
+".btn.danger{background:var(--d)}"
+".btn.danger:hover{background:#D32F2F}"
+".btn:disabled{background:#ccc;cursor:not-allowed}"
+".test-btn{padding:20px 40px;font-size:16px;margin:20px 0}"
+".msg{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);padding:12px 24px;background:#f44336;color:#fff;border-radius:6px;opacity:0;transition:opacity 0.3s;pointer-events:none}"
+".msg.ok{background:var(--p)}"
+".msg.show{opacity:1}"
+"@media(max-width:600px){.container{padding:10px}}"
 "</style>"
-"</head>"
-"<body>"
+"</head><body>"
 "<div class='container'>"
-"<h1>🎹 LinkMIDI 配置</h1>"
-"<div id='status'></div>"
-
-"<div class='section'>"
-"<h2>WiFi 配置</h2>"
-"<label for='ssid'>网络名称 (SSID):</label>"
-"<select id='ssid' onchange='updateSSID()'><option value=''>请先扫描...</option></select>"
-"<button onclick='scanWiFi()' style='margin-bottom:10px;'>🔍 扫描WiFi</button>"
-"<label for='password'>密码:</label>"
-"<input type='password' id='password' placeholder='WiFi密码'>"
-"<button onclick='connectWiFi()'>连接 WiFi</button>"
+"<h1>🎹 LinkMIDI</h1>"
+"<div class='grid'>"
+"<div class='card' id='w'><h3>📶 WiFi</h3><div class='st' id='ws'>未连接</div><div class='dt' id='wd'>-</div></div>"
+"<div class='card' id='u'><h3>🔌 USB</h3><div class='st' id='us'>未连接</div><div class='dt' id='ud'>-</div></div>"
+"<div class='card' id='n'><h3>🌐 Network</h3><div class='st' id='ns'>未连接</div><div class='dt' id='nd'>-</div></div>"
 "</div>"
-
-"<div class='section'>"
-"<h2>设备配置</h2>"
-"<label for='device_name'>设备名称:</label>"
-"<input type='text' id='device_name' placeholder='LinkMIDI-Device'>"
-"<label for='listen_port'>监听端口:</label>"
-"<input type='number' id='listen_port' value='5506' min='1024' max='65535'>"
-"<button onclick='saveConfig()'>保存配置</button>"
+"<div class='panel'><h3 style='margin:0'>🎵 测试音符</h3>"
+"<button class='btn test-btn' id='tb' onclick='testNote()' disabled>发送 A4</button>"
+"<div id='tn' style='font-size:12px;color:#666;text-align:center'>需要 Network MIDI 连接</div>"
 "</div>"
-
-"<div class='section'>"
-"<h2>系统管理</h2>"
-"<button onclick='getInfo()'>系统信息</button>"
-"<button onclick='restart()'>重启设备</button>"
-"<button class='danger' onclick='factoryReset()'>恢复出厂设置</button>"
+"<div class='panel'><h2>📶 WiFi</h2>"
+"<div class='fg'><label>SSID</label><select id='ssid'><option>扫描...</option></select></div>"
+"<div class='fg'><label>密码</label><input type='password' id='pwd'></div>"
+"<button class='btn' onclick='connectWifi()'>连接</button>"
 "</div>"
-
-"<div class='section'>"
-"<h2>固件升级</h2>"
-"<label for='firmware'>选择固件文件:</label>"
-"<input type='file' id='firmware' accept='.bin'>"
-"<button onclick='uploadFirmware()'>上传并升级</button>"
-"<div id='ota_status' style='margin-top:10px;'></div>"
+"<div class='panel'><h2>⚙️ 配置</h2>"
+"<div class='fg'><label>设备名</label><input type='text' id='dn'></div>"
+"<div class='fg'><label>端口</label><input type='number' id='port' min='1024' max='65535'></div>"
+"<button class='btn' onclick='save()'>保存</button>"
 "</div>"
-
+"<div class='panel'><h2>🔧 系统</h2>"
+"<button class='btn' onclick='info()'>信息</button>"
+"<button class='btn' onclick='restart()'>重启</button>"
+"<button class='btn danger' onclick='reset()'>恢复</button>"
 "</div>"
-
+"</div>"
+"<div class='msg' id='msg'></div>"
 "<script>"
-"function showStatus(msg, isError) {"
-"var s = document.getElementById('status');"
-"s.textContent = msg;"
-"s.className = isError ? 'error' : 'success';"
-"s.style.display = 'block';"
-"setTimeout(() => s.style.display = 'none', 5000);"
+"let testOn=false,lastNm2=false;"
+"function show(t,ok){var m=document.getElementById('msg');m.textContent=t;m.className='msg '+(ok?'ok':'')+' show';setTimeout(()=>m.className='msg',3000)}"
+"function upd(d){if(!d)return;"
+"var w=d.wifi,u=d.usb,n=d.nm2;"
+"document.getElementById('ws').textContent=w.status==='connected'?'已连接':'未连接';document.getElementById('wd').textContent=w.ip||'-';document.getElementById('w').className='card '+(w.status==='connected'?'on':'');"
+"document.getElementById('us').textContent=u.status==='connected'?'已连接':'未连接';document.getElementById('ud').textContent='设备:'+(u.device_count||0);document.getElementById('u').className='card '+(u.status==='connected'?'on':'');"
+"var nc=n.status==='connected';document.getElementById('ns').textContent=nc?'已连接':'未连接';document.getElementById('nd').textContent=n.remote_name||'-';document.getElementById('n').className='card '+(nc?'on':'');"
+"if(lastNm2&&!nc)testOn=false;lastNm2=nc;document.getElementById('tb').disabled=!nc;document.getElementById('tn').textContent=nc?'点击发送 Note':'需要连接';"
 "}"
-
-"function scanWiFi() {"
-"fetch('/api/wifi/scan')"
-".then(r => r.json())"
-".then(data => {"
-"var sel = document.getElementById('ssid');"
-"sel.innerHTML = '<option value=\"\">选择网络...</option>';"
-"data.forEach(net => {"
-"var opt = document.createElement('option');"
-"opt.value = net.ssid;"
-"opt.textContent = net.ssid + ' (' + net.rssi + ' dBm)';"
-"sel.appendChild(opt);"
-"});"
-"})"
-".catch(err => showStatus('扫描失败: ' + err, true));"
+"function ref(){fetch('/api/status').then(r=>r.json()).then(upd).catch(e=>console.log(e))}"
+"function scan(){fetch('/api/wifi/scan').then(r=>r.json()).then(d=>{var s=document.getElementById('ssid');s.innerHTML='<option value=\"\">选择...</option>';if(d&&d.length)d.forEach(x=>{var o=document.createElement('option');o.value=x.ssid;o.textContent=x.ssid+' ('+x.rssi+')';s.appendChild(o)})}).catch(e=>show('扫描失败'))}"
+"function connectWifi(){var ss=document.getElementById('ssid').value,ps=document.getElementById('pwd').value;if(!ss){show('选择WiFi');return}var btn=event.target;btn.disabled=true;fetch('/api/wifi/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid:ss,password:ps})}).then(r=>r.json()).then(d=>{btn.disabled=false;if(d.success){show('连接成功',1);setTimeout(()=>location.reload(),2000)}else show(d.message||'失败')}).catch(e=>{btn.disabled=false;show(e.message)})}"
+"function load(){fetch('/api/config').then(r=>r.json()).then(d=>{document.getElementById('dn').value=d.device_name||'';document.getElementById('port').value=d.listen_port||5506}).catch(e=>console.log(e))}"
+"function save(){var dn=document.getElementById('dn').value,p=parseInt(document.getElementById('port').value);if(!dn){show('输入设备名');return}if(isNaN(p)||p<1024){show('端口无效');return}var btn=event.target;btn.disabled=true;fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_name:dn,listen_port:p})}).then(r=>r.json()).then(d=>{btn.disabled=false;if(d.success)show('已保存',1);else show(d.message||'失败')}).catch(e=>{btn.disabled=false;show(e.message)})}"
+"function testNote(){var btn=document.getElementById('tb');if(btn.disabled)return;testOn=!testOn;fetch('/api/midi/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:69,velocity:100,on:testOn})}).then(r=>r.json()).then(d=>{if(!d.success){testOn=!testOn;show(d.message||'失败')}}).catch(e=>{testOn=!testOn;show(e.message)})}"
+"function info(){fetch('/api/system/info').then(r=>r.json()).then(d=>alert('设备:'+d.device_name+'\\n版本:'+d.version+'\\nIP:'+d.ip+'\\n内存:'+Math.round(d.free_heap/1024)+'KB')).catch(e=>show(e.message))}"
+"function restart(){if(confirm('重启?'))fetch('/api/system/restart',{method:'POST'})}"
+"function reset(){if(confirm('恢复出厂?所有配置会清除!'))fetch('/api/system/factory_reset',{method:'POST'})}"
+"window.onload=function(){"
+"ref();load();scan();"
+"setInterval(ref,2000);"
 "}"
-
-"function updateSSID() {"
-"var ssid = document.getElementById('ssid').value;"
-"if (ssid) document.getElementById('password').focus();"
-"}"
-
-"function connectWiFi() {"
-"var ssid = document.getElementById('ssid').value;"
-"var pass = document.getElementById('password').value;"
-"if (!ssid) { showStatus('请选择WiFi网络', true); return; }"
-"fetch('/api/wifi/connect', {"
-"method: 'POST',"
-"headers: {'Content-Type': 'application/json'},"
-"body: JSON.stringify({ssid: ssid, password: pass})"
-"})"
-".then(r => r.json())"
-".then(data => {"
-"if (data.success) {"
-"showStatus('WiFi连接成功！IP: ' + data.ip, false);"
-"setTimeout(() => location.reload(), 3000);"
-"} else {"
-"showStatus('连接失败: ' + data.message, true);"
-"}"
-"})"
-".catch(err => showStatus('请求失败: ' + err, true));"
-"}"
-
-"function loadConfig() {"
-"fetch('/api/config')"
-".then(r => r.json())"
-".then(data => {"
-"document.getElementById('device_name').value = data.device_name || '';"
-"document.getElementById('listen_port').value = data.listen_port || 5506;"
-"})"
-".catch(err => console.error('加载配置失败:', err));"
-"}"
-
-"function saveConfig() {"
-"var config = {"
-"device_name: document.getElementById('device_name').value,"
-"listen_port: parseInt(document.getElementById('listen_port').value)"
-"};"
-"fetch('/api/config', {"
-"method: 'POST',"
-"headers: {'Content-Type': 'application/json'},"
-"body: JSON.stringify(config)"
-"})"
-".then(r => r.json())"
-".then(data => {"
-"if (data.success) showStatus('配置已保存', false);"
-"else showStatus('保存失败: ' + data.message, true);"
-"})"
-".catch(err => showStatus('请求失败: ' + err, true));"
-"}"
-
-"function getInfo() {"
-"fetch('/api/system/info')"
-".then(r => r.json())"
-".then(data => {"
-"alert('设备: ' + data.device_name + '\\n'"
-"+ '固件版本: ' + data.version + '\\n'"
-"+ 'IP地址: ' + data.ip + '\\n'"
-"+ '运行分区: ' + data.partition + '\\n'"
-"+ '可用内存: ' + data.free_heap + ' bytes');"
-"})"
-".catch(err => showStatus('获取信息失败: ' + err, true));"
-"}"
-
-"function restart() {"
-"if (confirm('确定要重启设备吗？')) {"
-"fetch('/api/system/restart', {method: 'POST'})"
-".then(() => showStatus('设备正在重启...', false));"
-"}"
-"}"
-
-"function factoryReset() {"
-"if (confirm('确定要恢复出厂设置吗？所有配置将被清除！')) {"
-"fetch('/api/system/factory_reset', {method: 'POST'})"
-".then(() => showStatus('恢复出厂设置完成，设备将重启...', false));"
-"}"
-"}"
-
-"function uploadFirmware() {"
-"var file = document.getElementById('firmware').files[0];"
-"if (!file) { showStatus('请选择固件文件', true); return; }"
-"var status = document.getElementById('ota_status');"
-"status.textContent = '上传中...';"
-"var formData = new FormData();"
-"formData.append('firmware', file);"
-"fetch('/api/ota/upload', {"
-"method: 'POST',"
-"body: formData"
-"})"
-".then(r => r.json())"
-".then(data => {"
-"if (data.success) {"
-"status.textContent = '升级成功！设备将重启...';"
-"setTimeout(() => location.reload(), 5000);"
-"} else {"
-"status.textContent = '升级失败: ' + data.message;"
-"}"
-"})"
-".catch(err => status.textContent = '上传失败: ' + err);"
-"}"
-
-"// 页面加载时初始化"
-"window.onload = function() {"
-"scanWiFi();"
-"loadConfig();"
-"};"
 "</script>"
-"</body>"
-"</html>";
+"</body></html>";
 
 /* ============================================================================
  * HTTP处理函数
  * ============================================================================ */
 
 static esp_err_t http_get_index(httpd_req_t *req) {
+    size_t html_len = strlen(html_index);
+    ESP_LOGI(TAG, "Sending HTML page, length: %d bytes", html_len);
+    
+    // 设置响应头
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, html_index, strlen(html_index));
+    httpd_resp_set_hdr(req, "Content-Encoding", "identity");
+    
+    // 使用 httpd_resp_send 一次性发送，ESP-IDF会自动处理分块编码
+    // 这种方式比手动分块更可靠
+    esp_err_t err = httpd_resp_send(req, html_index, html_len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send HTML: %s", esp_err_to_name(err));
+        return err;
+    }
+    
+    ESP_LOGI(TAG, "HTML page sent successfully");
     return ESP_OK;
 }
 
@@ -561,6 +464,345 @@ static esp_err_t http_get_system_info(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* ============================================================================
+ * 新增API: 状态查询与实时推送
+ * ============================================================================ */
+
+/**
+ * @brief 获取所有状态 (WiFi, USB, NM2)
+ */
+static esp_err_t http_get_status(httpd_req_t *req) {
+    cJSON *root = cJSON_CreateObject();
+    
+    // WiFi 状态 (使用回调)
+    cJSON *wifi = cJSON_CreateObject();
+    int mode = 0;
+    bool wifi_connected = false;
+    
+    ESP_LOGI(TAG, "[STATUS] Checking WiFi status...");
+    ESP_LOGI(TAG, "[STATUS] wifi_get_mode callback = %p", g_status_callbacks.wifi_get_mode);
+    ESP_LOGI(TAG, "[STATUS] wifi_is_connected callback = %p", g_status_callbacks.wifi_is_connected);
+    
+    if (g_status_callbacks.wifi_get_mode) {
+        mode = g_status_callbacks.wifi_get_mode();
+        ESP_LOGI(TAG, "[STATUS] WiFi mode = %d", mode);
+    }
+    if (g_status_callbacks.wifi_is_connected) {
+        wifi_connected = g_status_callbacks.wifi_is_connected();
+        ESP_LOGI(TAG, "[STATUS] WiFi connected = %d", wifi_connected);
+    }
+    
+    cJSON_AddStringToObject(wifi, "status", 
+        mode == 2 ? "connected" :      // WIFI_RUN_MODE_STA_CONNECTED
+        mode == 1 ? "connecting" :     // WIFI_RUN_MODE_STA_TRYING
+        mode == 3 ? "ap_mode" : "disconnected");  // WIFI_RUN_MODE_AP
+    
+    if (wifi_connected) {
+        char ip_str[16] = "unknown";
+        if (g_status_callbacks.wifi_get_ip) {
+            g_status_callbacks.wifi_get_ip(ip_str, sizeof(ip_str));
+        }
+        cJSON_AddStringToObject(wifi, "ip", ip_str);
+        
+        // 获取 SSID 和 RSSI
+        wifi_ap_record_t ap_info;
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            cJSON_AddStringToObject(wifi, "ssid", (char*)ap_info.ssid);
+            cJSON_AddNumberToObject(wifi, "rssi", ap_info.rssi);
+        }
+    }
+    cJSON_AddItemToObject(root, "wifi", wifi);
+    
+    // USB 状态 (使用回调)
+    cJSON *usb = cJSON_CreateObject();
+    uint8_t usb_dev_count = 0;
+    bool usb_connected = false;
+    
+    if (g_status_callbacks.usb_get_device_count) {
+        usb_dev_count = g_status_callbacks.usb_get_device_count();
+        usb_connected = usb_dev_count > 0;
+    }
+    
+    cJSON_AddStringToObject(usb, "status", usb_connected ? "connected" : "disconnected");
+    cJSON_AddNumberToObject(usb, "device_count", usb_dev_count);
+    
+    if (g_status_callbacks.usb_is_running) {
+        cJSON_AddBoolToObject(usb, "running", g_status_callbacks.usb_is_running());
+    }
+    cJSON_AddItemToObject(root, "usb", usb);
+    
+    // NM2 会话状态 (使用回调)
+    cJSON *nm2 = cJSON_CreateObject();
+    bool nm2_active = false;
+    
+    if (g_status_callbacks.nm2_is_session_active) {
+        nm2_active = g_status_callbacks.nm2_is_session_active();
+    }
+    
+    cJSON_AddStringToObject(nm2, "status", nm2_active ? "connected" : "disconnected");
+    
+    if (nm2_active) {
+        if (g_status_callbacks.nm2_get_remote_name) {
+            const char* remote_name = g_status_callbacks.nm2_get_remote_name();
+            if (remote_name) {
+                cJSON_AddStringToObject(nm2, "remote_name", remote_name);
+            }
+        }
+    }
+    cJSON_AddItemToObject(root, "nm2", nm2);
+    
+    char *json_str = cJSON_Print(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    
+    free(json_str);
+    cJSON_Delete(root);
+    
+    return ESP_OK;
+}
+
+/**
+ * @brief 构建状态JSON对象 (避免重复代码)
+ */
+static cJSON* build_status_json(void) {
+    cJSON *root = cJSON_CreateObject();
+    
+    // WiFi 状态
+    cJSON *wifi = cJSON_CreateObject();
+    int mode = 0;
+    if (g_status_callbacks.wifi_get_mode) {
+        mode = g_status_callbacks.wifi_get_mode();
+    }
+    cJSON_AddStringToObject(wifi, "status", 
+        mode == 2 ? "connected" :
+        mode == 1 ? "connecting" :
+        mode == 3 ? "ap_mode" : "disconnected");
+    if (mode == 2) {
+        char ip_str[16] = "unknown";
+        if (g_status_callbacks.wifi_get_ip) {
+            g_status_callbacks.wifi_get_ip(ip_str, sizeof(ip_str));
+        }
+        cJSON_AddStringToObject(wifi, "ip", ip_str);
+    }
+    cJSON_AddItemToObject(root, "wifi", wifi);
+    
+    // USB 状态
+    cJSON *usb = cJSON_CreateObject();
+    uint8_t usb_count = 0;
+    if (g_status_callbacks.usb_get_device_count) {
+        usb_count = g_status_callbacks.usb_get_device_count();
+    }
+    cJSON_AddStringToObject(usb, "status", usb_count > 0 ? "connected" : "disconnected");
+    cJSON_AddNumberToObject(usb, "device_count", usb_count);
+    cJSON_AddItemToObject(root, "usb", usb);
+    
+    // NM2 状态
+    cJSON *nm2 = cJSON_CreateObject();
+    bool nm2_active = false;
+    if (g_status_callbacks.nm2_is_session_active) {
+        nm2_active = g_status_callbacks.nm2_is_session_active();
+    }
+    cJSON_AddStringToObject(nm2, "status", nm2_active ? "connected" : "disconnected");
+    if (nm2_active && g_status_callbacks.nm2_get_remote_name) {
+        const char* name = g_status_callbacks.nm2_get_remote_name();
+        if (name) {
+            cJSON_AddStringToObject(nm2, "remote_name", name);
+        }
+    }
+    cJSON_AddItemToObject(root, "nm2", nm2);
+    
+    return root;
+}
+
+/**
+ * @brief SSE 实时状态推送 (优化版本)
+ */
+static esp_err_t http_get_status_stream(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/event-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Connection", "keep-alive");
+    httpd_resp_set_hdr(req, "X-Accel-Buffering", "no");
+    
+    ESP_LOGI(TAG, "SSE client connected");
+    
+    // 发送初始状态
+    cJSON *json = build_status_json();
+    char *json_str = cJSON_Print(json);
+    char sse_buf[1024];
+    snprintf(sse_buf, sizeof(sse_buf), "data: %s\n\n", json_str);
+    
+    esp_err_t err = httpd_resp_send_chunk(req, sse_buf, strlen(sse_buf));
+    free(json_str);
+    cJSON_Delete(json);
+    
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to send initial SSE data");
+        return err;
+    }
+    
+    // 持续推送状态更新 (每秒检查一次)
+    int heartbeat_count = 0;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        
+        // 每5秒发送完整状态 (心跳计数到5次)
+        if (heartbeat_count % 5 == 0) {
+            json = build_status_json();
+            json_str = cJSON_Print(json);
+            snprintf(sse_buf, sizeof(sse_buf), "data: %s\n\n", json_str);
+            
+            err = httpd_resp_send_chunk(req, sse_buf, strlen(sse_buf));
+            free(json_str);
+            cJSON_Delete(json);
+            
+            if (err != ESP_OK) {
+                ESP_LOGI(TAG, "SSE client disconnected");
+                break;
+            }
+        } else {
+            // 心跳消息 (注释行，客户端会忽略)
+            err = httpd_resp_send_chunk(req, ": keep-alive\n\n", 14);
+            if (err != ESP_OK) {
+                ESP_LOGI(TAG, "SSE client disconnected (heartbeat)");
+                break;
+            }
+        }
+        
+        heartbeat_count++;
+    }
+    
+    httpd_resp_send_chunk(req, NULL, 0);  // 结束响应
+    return ESP_OK;
+}
+
+/**
+ * @brief 发送测试音符
+ */
+static esp_err_t http_post_midi_test(httpd_req_t *req) {
+    char buf[128];
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+    
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_FAIL;
+    }
+    
+    // 解析参数
+    cJSON *note_json = cJSON_GetObjectItem(root, "note");
+    cJSON *velocity_json = cJSON_GetObjectItem(root, "velocity");
+    cJSON *on_json = cJSON_GetObjectItem(root, "on");  // true=Note On, false=Note Off
+    
+    uint8_t note = note_json ? note_json->valueint : 69;  // 默认 A4 (69)
+    uint8_t velocity = velocity_json ? velocity_json->valueint : 100;
+    bool note_on = on_json ? on_json->valueint : true;
+    
+    // 构建 MIDI 消息
+    uint8_t status = note_on ? 0x90 : 0x80;  // Note On/Off (channel 0)
+    
+    ESP_LOGI(TAG, "Test MIDI: %s note=%d vel=%d", note_on ? "Note On" : "Note Off", note, velocity);
+    
+    // 发送到网络 (使用回调)
+    cJSON *resp = cJSON_CreateObject();
+    
+    bool nm2_active = false;
+    if (g_status_callbacks.nm2_is_session_active) {
+        nm2_active = g_status_callbacks.nm2_is_session_active();
+    }
+    
+    if (nm2_active && g_status_callbacks.nm2_send_midi) {
+        bool success = g_status_callbacks.nm2_send_midi(status, note, note_on ? velocity : 0);
+        if (success) {
+            cJSON_AddBoolToObject(resp, "success", true);
+            cJSON_AddStringToObject(resp, "message", "MIDI sent to network");
+        } else {
+            cJSON_AddBoolToObject(resp, "success", false);
+            cJSON_AddStringToObject(resp, "message", "Failed to send MIDI");
+        }
+    } else {
+        cJSON_AddBoolToObject(resp, "success", false);
+        cJSON_AddStringToObject(resp, "message", "No active NM2 session");
+    }
+    
+    char *json_str = cJSON_Print(resp);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    
+    free(json_str);
+    cJSON_Delete(resp);
+    cJSON_Delete(root);
+    
+    return ESP_OK;
+}
+
+/**
+ * @brief 获取 USB 设备状态 (使用回调)
+ */
+static esp_err_t http_get_usb_status(httpd_req_t *req) {
+    cJSON *root = cJSON_CreateObject();
+    
+    uint8_t dev_count = 0;
+    bool running = false;
+    
+    if (g_status_callbacks.usb_get_device_count) {
+        dev_count = g_status_callbacks.usb_get_device_count();
+    }
+    if (g_status_callbacks.usb_is_running) {
+        running = g_status_callbacks.usb_is_running();
+    }
+    
+    cJSON_AddNumberToObject(root, "device_count", dev_count);
+    cJSON_AddBoolToObject(root, "running", running);
+    cJSON_AddStringToObject(root, "status", dev_count > 0 ? "connected" : "disconnected");
+    
+    char *json_str = cJSON_Print(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    
+    free(json_str);
+    cJSON_Delete(root);
+    
+    return ESP_OK;
+}
+
+/**
+ * @brief 获取 NM2 会话状态 (使用回调)
+ */
+static esp_err_t http_get_nm2_status(httpd_req_t *req) {
+    cJSON *root = cJSON_CreateObject();
+    
+    bool active = false;
+    if (g_status_callbacks.nm2_is_session_active) {
+        active = g_status_callbacks.nm2_is_session_active();
+    }
+    
+    cJSON_AddBoolToObject(root, "active", active);
+    cJSON_AddStringToObject(root, "status", active ? "connected" : "disconnected");
+    
+    if (active) {
+        if (g_status_callbacks.nm2_get_remote_name) {
+            const char* remote_name = g_status_callbacks.nm2_get_remote_name();
+            if (remote_name) {
+                cJSON_AddStringToObject(root, "remote_name", remote_name);
+            }
+        }
+    }
+    
+    char *json_str = cJSON_Print(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_str, strlen(json_str));
+    
+    free(json_str);
+    cJSON_Delete(root);
+    
+    return ESP_OK;
+}
+
 static esp_err_t http_post_restart(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "success", true);
@@ -617,6 +859,15 @@ midi_error_t web_config_server_init(const web_server_config_t* config) {
     return MIDI_OK;
 }
 
+midi_error_t web_config_server_register_callbacks(const web_status_callbacks_t* callbacks) {
+    if (callbacks) {
+        g_status_callbacks = *callbacks;
+        ESP_LOGI(TAG, "Status callbacks registered: mode=%p, connected=%p, ip=%p", 
+            callbacks->wifi_get_mode, callbacks->wifi_is_connected, callbacks->wifi_get_ip);
+    }
+    return MIDI_OK;
+}
+
 midi_error_t web_config_server_start(void) {
     if (g_running) {
         return MIDI_ERR_ALREADY_INITIALIZED;
@@ -624,7 +875,7 @@ midi_error_t web_config_server_start(void) {
     
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = g_port;
-    config.max_uri_handlers = 10;
+    config.max_uri_handlers = 20;  // 增加以支持新端点
     
     esp_err_t err = httpd_start(&g_server, &config);
     if (err != ESP_OK) {
@@ -689,8 +940,44 @@ midi_error_t web_config_server_start(void) {
     };
     httpd_register_uri_handler(g_server, &uri_factory_reset);
     
+    // 新增API端点
+    httpd_uri_t uri_status = {
+        .uri = "/api/status",
+        .method = HTTP_GET,
+        .handler = http_get_status,
+    };
+    httpd_register_uri_handler(g_server, &uri_status);
+    
+    httpd_uri_t uri_status_stream = {
+        .uri = "/api/status/stream",
+        .method = HTTP_GET,
+        .handler = http_get_status_stream,
+    };
+    httpd_register_uri_handler(g_server, &uri_status_stream);
+    
+    httpd_uri_t uri_midi_test = {
+        .uri = "/api/midi/test",
+        .method = HTTP_POST,
+        .handler = http_post_midi_test,
+    };
+    httpd_register_uri_handler(g_server, &uri_midi_test);
+    
+    httpd_uri_t uri_usb_status = {
+        .uri = "/api/usb/status",
+        .method = HTTP_GET,
+        .handler = http_get_usb_status,
+    };
+    httpd_register_uri_handler(g_server, &uri_usb_status);
+    
+    httpd_uri_t uri_nm2_status = {
+        .uri = "/api/nm2/status",
+        .method = HTTP_GET,
+        .handler = http_get_nm2_status,
+    };
+    httpd_register_uri_handler(g_server, &uri_nm2_status);
+    
     g_running = true;
-    ESP_LOGI(TAG, "Web server started on port %d", g_port);
+    ESP_LOGI(TAG, "Web server started on port %d with %d handlers", g_port, 15);
     
     return MIDI_OK;
 }

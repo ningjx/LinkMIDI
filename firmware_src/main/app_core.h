@@ -12,6 +12,10 @@
 #include "midi_error.h"
 #include "config_manager.h"  // 引入 system_config_t
 
+// 前向声明
+typedef struct network_midi2_context network_midi2_context_t;
+typedef struct usb_midi_host_context usb_midi_host_context_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -83,6 +87,18 @@ midi_error_t app_core_update_wifi_config(const char* ssid, const char* password)
  * @return MIDI_OK 成功
  */
 midi_error_t app_core_update_midi_config(const char* device_name, uint16_t listen_port);
+
+/**
+ * @brief 获取 Network MIDI2 上下文
+ * @return 上下文指针（只读）
+ */
+network_midi2_context_t* app_core_get_midi2_context(void);
+
+/**
+ * @brief 获取 USB MIDI Host 上下文
+ * @return 上下文指针（只读）
+ */
+usb_midi_host_context_t* app_core_get_usb_midi_context(void);
 
 #ifdef __cplusplus
 }

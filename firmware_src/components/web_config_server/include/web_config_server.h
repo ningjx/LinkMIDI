@@ -9,6 +9,8 @@
 #define WEB_CONFIG_SERVER_H
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
 #include "midi_error.h"
 
 #ifdef __cplusplus
@@ -24,11 +26,41 @@ typedef struct {
 } web_server_config_t;
 
 /**
+ * @brief 状态获取回调类型
+ */
+typedef struct {
+    // WiFi 状态回调
+    int (*wifi_get_mode)(void);  // Returns wifi_run_mode_t
+    bool (*wifi_is_connected)(void);
+    void (*wifi_get_ip)(char* ip_str, size_t len);
+    int (*wifi_get_rssi)(void);
+    const char* (*wifi_get_ssid)(void);
+    
+    // USB 状态回调
+    uint8_t (*usb_get_device_count)(void);
+    bool (*usb_get_device_info)(uint8_t index, void* dev_info);
+    bool (*usb_is_running)(void);
+    
+    // NM2 状态回调
+    bool (*nm2_is_session_active)(void);
+    const char* (*nm2_get_remote_name)(void);
+    bool (*nm2_get_session_info)(void* session);
+    bool (*nm2_send_midi)(uint8_t status, uint8_t data1, uint8_t data2);
+} web_status_callbacks_t;
+
+/**
  * @brief 初始化Web配置服务器
  * @param config 服务器配置
  * @return MIDI_OK 成功
  */
 midi_error_t web_config_server_init(const web_server_config_t* config);
+
+/**
+ * @brief 注册状态回调函数
+ * @param callbacks 回调函数结构体
+ * @return MIDI_OK 成功
+ */
+midi_error_t web_config_server_register_callbacks(const web_status_callbacks_t* callbacks);
 
 /**
  * @brief 启动Web服务器
