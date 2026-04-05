@@ -1,3 +1,5 @@
 ## IDF Component Manager Manifest File
+version: "1.0.0"
+description: "LinkMIDI - USB MIDI to Network MIDI 2.0 Bridge"
 dependencies:
   espressif/mdns: "^1.0.0"
