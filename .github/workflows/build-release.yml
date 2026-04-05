@@ -15,10 +15,12 @@ jobs:
       
       - name: Build firmware
         run: |
-          docker run --rm -v ${{ github.workspace }}:/workspace espressif/idf:v5.5.3 /bin/bash -c "
+          docker run --rm -u 0:0 -v ${{ github.workspace }}:/workspace espressif/idf:v5.5.3 /bin/bash -c "
             cd /workspace/firmware_src
             idf.py set-target esp32s3
             idf.py build
+            # Fix permissions for output files
+            chmod -R 777 build/
           "
       
       - name: Extract version from tag
@@ -29,10 +31,12 @@ jobs:
           echo "firmware_name=linkmidi_${VERSION}.bin" >> $GITHUB_OUTPUT
       
       - name: Rename firmware binary
-        working-directory: ./firmware_src/build
         run: |
+          cd ${{ github.workspace }}/firmware_src/build
           if [ -f "midi2net.bin" ]; then
             cp midi2net.bin "${{ steps.tag_version.outputs.firmware_name }}"
+            chmod 644 "${{ steps.tag_version.outputs.firmware_name }}"
+            ls -lh "${{ steps.tag_version.outputs.firmware_name }}"
           else
             echo "Error: midi2net.bin not found!"
             ls -la
