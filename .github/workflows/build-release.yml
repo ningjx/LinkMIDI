@@ -13,20 +13,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Setup ESP-IDF
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          esp_idf_version: v5.5.3
-          target: esp32s3
-          path-to-workspace: ./
-      
       - name: Build firmware
-        shell: bash
-        working-directory: ./firmware_src
         run: |
-          . $IDF_PATH/export.sh
-          idf.py set-target esp32s3
-          idf.py build
+          docker run --rm -v ${{ github.workspace }}:/workspace espressif/idf:v5.5.3 /bin/bash -c "
+            cd /workspace/firmware_src
+            idf.py set-target esp32s3
+            idf.py build
+          "
       
       - name: Extract version from tag
         id: tag_version
