@@ -1,0 +1,84 @@
+name: Build and Release Firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup ESP-IDF
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.3
+          target: esp32s3
+          path-to-workspace: ./
+      
+      - name: Build firmware
+        shell: bash
+        working-directory: ./firmware_src
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target esp32s3
+          idf.py build
+      
+      - name: Extract version from tag
+        id: tag_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "firmware_name=linkmidi_${VERSION}.bin" >> $GITHUB_OUTPUT
+      
+      - name: Rename firmware binary
+        working-directory: ./firmware_src/build
+        run: |
+          if [ -f "midi2net.bin" ]; then
+            cp midi2net.bin "${{ steps.tag_version.outputs.firmware_name }}"
+          else
+            echo "Error: midi2net.bin not found!"
+            ls -la
+            exit 1
+          fi
+      
+      - name: Create Release and Upload Firmware
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./firmware_src/build/${{ steps.tag_version.outputs.firmware_name }}
+          body: |
+            # LinkMIDI Firmware Release
+            
+            **Version:** ${{ steps.tag_version.outputs.version }}
+            
+            ## Firmware Information
+            - **Firmware Name:** ${{ steps.tag_version.outputs.firmware_name }}
+            - **Target:** ESP32-S3-N8R8
+            - **Flash Size:** 8MB
+            - **PSRAM:** 8MB
+            
+            ## Installation
+            
+            Use the following command to flash the firmware:
+            
+            ```bash
+            idf.py -p COM_PORT flash:write_flash 0x10000 ${{ steps.tag_version.outputs.firmware_name }}
+            ```
+            
+            Or using esptool.py:
+            
+            ```bash
+            esptool.py -p COM_PORT -b 460800 --chip esp32s3 write_flash -z -fm dio -fb keep -fc keep -fs keep 0x10000 ${{ steps.tag_version.outputs.firmware_name }}
+            ```
+            
+            ## Release Notes
+            
+            See [CHANGELOG.md](CHANGELOG.md) for detailed changes.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
